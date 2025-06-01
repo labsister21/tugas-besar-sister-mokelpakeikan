@@ -1,0 +1,6 @@
+com\raft\node\NodeType.class
+com\raft\node\RaftNode.class
+com\raft\node\Log.class
+com\raft\Server.class
+com\raft\Main.class
+com\raft\App.class
