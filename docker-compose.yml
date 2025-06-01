@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  server1:
+    build: .
+    environment:
+      - NODE_TYPE=server
+      - SERVER_ID=server1
+      - DOCKER_MODE=true
+    ports:
+      - "8001:8001"
+    networks:
+      - raft-network
+
+  server2:
+    build: .
+    environment:
+      - NODE_TYPE=server
+      - SERVER_ID=server2
+      - DOCKER_MODE=true
+    ports:
+      - "8002:8002"
+    networks:
+      - raft-network
+
+  server3:
+    build: .
+    environment:
+      - NODE_TYPE=server
+      - SERVER_ID=server3
+      - DOCKER_MODE=true
+    ports:
+      - "8003:8003"
+    networks:
+      - raft-network
+
+  server4:
+    build: .
+    environment:
+      - NODE_TYPE=server
+      - SERVER_ID=server4
+      - DOCKER_MODE=true
+    ports:
+      - "8004:8004"
+    networks:
+      - raft-network
+
+  client:
+    build: .
+    environment:
+      - NODE_TYPE=client
+      - DOCKER_MODE=true
+    depends_on:
+      - server1
+      - server2
+      - server3
+      - server4
+    networks:
+      - raft-network
+    stdin_open: true
+    tty: true
+
+networks:
+  raft-network:
+    driver: bridge 
