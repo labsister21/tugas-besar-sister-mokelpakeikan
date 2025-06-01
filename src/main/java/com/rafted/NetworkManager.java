@@ -147,23 +147,46 @@ public class NetworkManager {
         try {
             // First check if we're the leader
             if (node.getState() != RaftNode.State.LEADER) {
+                // If not the leader, forward the command to the known leader
                 String leaderAddress = node.getLeaderAddress();
                 int leaderPort = node.getLeaderPort();
-                logger.info("Client command received. Current leaderId=" + node.getLeaderAddress());
 
                 if (leaderAddress != null && leaderPort != -1) {
-                    return new Message(MessageType.NOT_LEADER, "Not the leader. Please disconnect and please connect to " + leaderAddress + ":" + leaderPort);
+                    try (Socket leaderSocket = new Socket(leaderAddress, leaderPort);
+                         PrintWriter outToLeader = new PrintWriter(leaderSocket.getOutputStream(), true);
+                         BufferedReader inFromLeader = new BufferedReader(new InputStreamReader(leaderSocket.getInputStream()))) {
+
+                        // Forward the client command message to the leader
+                        outToLeader.println(objectMapper.writeValueAsString(request));
+
+                        // Get the response from the leader
+                        String responseStr = inFromLeader.readLine();
+                        if (responseStr != null) {
+                            // Return the leader's response to the original client
+                            return objectMapper.readValue(responseStr, Message.class);
+                        } else {
+                            return new Message(MessageType.ERROR, "Leader did not respond");
+                        }
+                    } catch (IOException e) {
+                        logger.warning("Failed to forward command to leader " + leaderAddress + ":" + leaderPort + ": " + e.getMessage());
+                        return new Message(MessageType.ERROR, "Failed to connect to leader");
+                    }
                 } else {
                     return new Message(MessageType.NOT_LEADER, "Not the leader. Leader is unknown.");
                 }
             }
-            
+
+            // If we are the leader, execute the command locally
             Command command = objectMapper.convertValue(request.getData(), Command.class);
             String result = executeCommand(command);
+            // TODO: Implement log replication before returning response
             return new Message(MessageType.CLIENT_RESPONSE, result);
         } catch (RaftNode.NotLeaderException e) {
+            // This exception should ideally not be caught here after the leader check,
+            // but keeping it for robustness.
             return new Message(MessageType.NOT_LEADER, e.getMessage());
         } catch (Exception e) {
+            logger.severe("Error handling client command: " + e.getMessage());
             return new Message(MessageType.ERROR, e.getMessage());
         }
     }
