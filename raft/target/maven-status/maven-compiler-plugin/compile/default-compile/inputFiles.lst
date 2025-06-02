@@ -1,9 +1,11 @@
 C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\App.java
 C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\Main.java
 C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\Log.java
+C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\NodeConnection.java
 C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\NodeType.java
 C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\RaftNode.java
 C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\ServerInfo.java
 C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\RaftServer.java
+C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\HeartbeatMessage.java
 C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\RpcMessage.java
 C:\Users\DELL\Documents\ITB\SMT-6\STD\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\RpcResponse.java

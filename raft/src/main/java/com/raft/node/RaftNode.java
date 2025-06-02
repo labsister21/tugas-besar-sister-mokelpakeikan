@@ -15,24 +15,36 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import java.util.Random;
 
 import com.raft.rpc.RpcMessage;
 import com.raft.rpc.RpcResponse;
+import com.google.gson.Gson;
+import com.raft.rpc.HeartbeatMessage;
 
 public class RaftNode {
     private final InetAddress address;
     private final int port;
-    private final NodeType nodeType;
+    private NodeType nodeType;
     private final List<ServerInfo> clusterMembers;
     private final Map<String, String> dataStore;
     private final Map<SocketChannel, ByteBuffer> clientBuffers;
     private final ExecutorService executorService;
+    private final Map<ServerInfo, NodeConnection> nodeConnections;
+    private final ScheduledExecutorService heartbeatExecutor;
     private ServerSocketChannel serverSocket;
     private Selector selector;
     private volatile boolean running;
+    private long currentTerm;
+    private final Gson gson;
+    private final float heartbeatTimeout;
+    private long lastHeartbeatReceived;
 
-    // Leader information
-    private ServerInfo leaderInfo;
+    // Constants
+    private static final long HEARTBEAT_INTERVAL = 5000; // 2 seconds
+    private static final Random random = new Random();
 
     public RaftNode(String hostAddress, int port, NodeType nodeType) throws IOException {
         this.address = InetAddress.getByName(hostAddress);
@@ -41,26 +53,102 @@ public class RaftNode {
         this.dataStore = new ConcurrentHashMap<>();
         this.clientBuffers = new ConcurrentHashMap<>();
         this.executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+        this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor();
         this.clusterMembers = new ArrayList<>();
+        this.nodeConnections = new ConcurrentHashMap<>();
+        this.currentTerm = 0;
+        this.gson = new Gson();
         
-        // Initialize fixed cluster members (4 nodes)
+        // Initialize random heartbeat timeout between 5000-7000 milliseconds
+        this.heartbeatTimeout = 5000 + random.nextFloat() * 2000;
+        this.lastHeartbeatReceived = System.currentTimeMillis();
+        
         initializeClusterMembers();
         for (ServerInfo member : clusterMembers) {
             System.out.println("Cluster member: " + member.getHost() + ":" + member.getPort());
         }
-        // Set leader info if this node is the leader
+
         if (nodeType == NodeType.LEADER) {
             System.out.println("Node ini adalah leader");
-            this.leaderInfo = new ServerInfo(hostAddress, port, NodeType.LEADER);
+            initializeNodeConnections();
+            startHeartbeat();
+        } else {
+            System.out.printf("Node ini adalah follower dengan timeout %.2f ms%n", heartbeatTimeout);
+            startTimeoutChecker();
         }
     }
 
     private void initializeClusterMembers() {
-        // Add all 4 nodes to the cluster
         clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.LEADER));
         clusterMembers.add(new ServerInfo("localhost", 8002, NodeType.FOLLOWER));
         clusterMembers.add(new ServerInfo("localhost", 8003, NodeType.FOLLOWER));
         clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
+    }
+
+    private void initializeNodeConnections() {
+        for (ServerInfo member : clusterMembers) {
+            // Skip self-connection for leader
+            if (member.getPort() != this.port) {
+                NodeConnection connection = new NodeConnection(member);
+                nodeConnections.put(member, connection);
+            }
+        }
+    }
+
+    private void startTimeoutChecker() {
+        heartbeatExecutor.scheduleAtFixedRate(() -> {
+            long now = System.currentTimeMillis();
+            if (now - lastHeartbeatReceived > heartbeatTimeout) {
+                System.out.printf("No heartbeat received for %.2f ms. Leader might be down!%n", 
+                    (now - lastHeartbeatReceived));
+                nodeType = NodeType.CANDIDATE;
+            }
+        }, 1000, 1000, MILLISECONDS);
+    }
+
+    private void startHeartbeat() {
+        if (nodeType != NodeType.LEADER) {
+            return;
+        }
+
+        heartbeatExecutor.scheduleAtFixedRate(() -> {
+            for (Map.Entry<ServerInfo, NodeConnection> entry : nodeConnections.entrySet()) {
+                NodeConnection connection = entry.getValue();
+                
+                // Try to connect if not connected
+                if (!connection.isConnected()) {
+                    connection.connect();
+                }
+                
+                // Send heartbeat if connected
+                if (connection.isConnected()) {
+                    String leaderId = address.getHostAddress() + ":" + port;
+                    if (!connection.sendHeartbeat(leaderId, currentTerm)) {
+                        System.err.println("Failed to send heartbeat to " + entry.getKey());
+                    }
+                }
+            }
+        }, 0, HEARTBEAT_INTERVAL, MILLISECONDS);
+    }
+
+    private void handleHeartbeat(String message) {
+        try {
+            HeartbeatMessage heartbeat = gson.fromJson(message, HeartbeatMessage.class);
+            lastHeartbeatReceived = System.currentTimeMillis();
+            
+            // Only print on even timestamps
+            if (lastHeartbeatReceived % 2 == 0) {
+                System.out.println("Received heartbeat from leader: " + heartbeat.getLeaderId() + 
+                                 " (term: " + heartbeat.getTerm() + " heartbeat timeout: " + heartbeatTimeout + ")");
+            }
+            
+            // Update term if necessary
+            if (heartbeat.getTerm() > currentTerm) {
+                currentTerm = heartbeat.getTerm();
+            }
+        } catch (Exception e) {
+            System.err.println("Error processing heartbeat: " + e.getMessage());
+        }
     }
 
     public void startServer() throws IOException {
@@ -104,17 +192,17 @@ public class RaftNode {
         clientChannel.configureBlocking(false);
         clientChannel.register(selector, SelectionKey.OP_READ);
         clientBuffers.put(clientChannel, ByteBuffer.allocate(1024));
-        System.out.println("Klien terhubung: " + clientChannel.getRemoteAddress());
+        System.out.println("Client/Node terhubung: " + clientChannel.getRemoteAddress());
     }
 
     private void read(SelectionKey key) {
-        SocketChannel clientChannel = (SocketChannel) key.channel();
-        ByteBuffer buffer = clientBuffers.get(clientChannel);
+        SocketChannel channel = (SocketChannel) key.channel();
+        ByteBuffer buffer = clientBuffers.get(channel);
         
         try {
-            int bytesRead = clientChannel.read(buffer);
+            int bytesRead = channel.read(buffer);
             if (bytesRead == -1) {
-                closeConnection(clientChannel);
+                closeConnection(channel);
                 return;
             }
 
@@ -125,11 +213,17 @@ public class RaftNode {
                 buffer.clear();
 
                 String message = new String(data).trim();
-                System.out.println("Message: " + message);
-                processClientMessage(clientChannel, message);
+                System.out.println("Message received: " + message);
+
+                // Check if it's a heartbeat message
+                if (message.contains("\"type\":\"HEARTBEAT\"")) {
+                    handleHeartbeat(message);
+                } else {
+                    processClientMessage(channel, message);
+                }
             }
         } catch (IOException e) {
-            closeConnection(clientChannel);
+            closeConnection(channel);
         }
     }
 
@@ -217,6 +311,13 @@ public class RaftNode {
     public void stopServer() {
         running = false;
         executorService.shutdown();
+        heartbeatExecutor.shutdown();
+        
+        // Close all node connections
+        for (NodeConnection connection : nodeConnections.values()) {
+            connection.disconnect();
+        }
+        
         try {
             if (selector != null && selector.isOpen()) {
                 selector.close();
