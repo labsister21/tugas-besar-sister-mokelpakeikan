@@ -1,13 +1,12 @@
 package com.raft.node;
 
-import com.google.gson.Gson;
-import com.raft.rpc.HeartbeatMessage;
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import com.google.gson.Gson;
 
 public class NodeConnection {
     private final ServerInfo serverInfo;
@@ -23,7 +22,7 @@ public class NodeConnection {
         this.gson = new Gson();
     }
 
-    public boolean connect() {
+    public void connect() {
         try {
             channel = SocketChannel.open();
             channel.configureBlocking(false);
@@ -35,11 +34,11 @@ public class NodeConnection {
             }
             
             isConnected.set(true);
-            return true;
-        } catch (IOException | InterruptedException e) {
-            System.err.println("Failed to connect to " + serverInfo + ": " + e.getMessage());
+            System.out.println("Connected to " + serverInfo.getHost() + ":" + serverInfo.getPort());
+        } catch (Exception e) {
+            System.err.println("Failed to connect to " + serverInfo.getHost() + ":" + 
+                             serverInfo.getPort() + ": " + e.getMessage());
             disconnect();
-            return false;
         }
     }
 
@@ -49,28 +48,37 @@ public class NodeConnection {
             try {
                 channel.close();
             } catch (IOException e) {
-                System.err.println("Error closing connection to " + serverInfo + ": " + e.getMessage());
+                System.err.println("Error closing channel: " + e.getMessage());
             }
         }
     }
 
+    public boolean isConnected() {
+        return isConnected.get() && channel != null && channel.isConnected();
+    }
+
+    public void send(String message) throws IOException {
+        if (!isConnected()) {
+            throw new IOException("Not connected");
+        }
+        ByteBuffer buffer = ByteBuffer.wrap((message + "\n").getBytes());
+        channel.write(buffer);
+    }
+
     public boolean sendHeartbeat(String leaderId, long term) {
-        if (!isConnected.get() || channel == null) {
+        if (!isConnected()) {
             return false;
         }
 
         try {
-            HeartbeatMessage heartbeat = new HeartbeatMessage(leaderId, term);
-            String message = gson.toJson(heartbeat) + "\n";
-            ByteBuffer buffer = ByteBuffer.wrap(message.getBytes());
-            
-            while (buffer.hasRemaining()) {
-                channel.write(buffer);
-            }
-            
+            String heartbeat = String.format(
+                "{\"type\":\"HEARTBEAT\",\"leaderId\":\"%s\",\"term\":%d}",
+                leaderId, term
+            );
+            send(heartbeat);
             return true;
-        } catch (IOException e) {
-            System.err.println("Failed to send heartbeat to " + serverInfo + ": " + e.getMessage());
+        } catch (Exception e) {
+            System.err.println("Failed to send heartbeat: " + e.getMessage());
             disconnect();
             return false;
         }
@@ -78,10 +86,6 @@ public class NodeConnection {
 
     public SocketChannel getChannel() {
         return channel;
-    }
-
-    public boolean isConnected() {
-        return isConnected.get();
     }
 
     public void updateLastHeartbeat() {

@@ -12,17 +12,18 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import java.util.Random;
 
-import com.raft.rpc.RpcMessage;
-import com.raft.rpc.RpcResponse;
 import com.google.gson.Gson;
 import com.raft.rpc.HeartbeatMessage;
+import com.raft.rpc.RpcMessage;
+import com.raft.rpc.RpcResponse;
+import com.raft.rpc.VoteMessage;
 
 public class RaftNode {
     private final InetAddress address;
@@ -41,6 +42,12 @@ public class RaftNode {
     private final Gson gson;
     private final float heartbeatTimeout;
     private long lastHeartbeatReceived;
+    private String votedFor;
+    private int receivedVotes;
+    private final Object voteLock = new Object();
+    private long lastLogIndex;
+    private long lastLogTerm;
+    private boolean inElection;
 
     // Constants
     private static final long HEARTBEAT_INTERVAL = 5000; // 2 seconds
@@ -63,14 +70,21 @@ public class RaftNode {
         this.heartbeatTimeout = 5000 + random.nextFloat() * 2000;
         this.lastHeartbeatReceived = System.currentTimeMillis();
         
+        this.votedFor = null;
+        this.receivedVotes = 0;
+        this.lastLogIndex = 0;
+        this.lastLogTerm = 0;
+        
         initializeClusterMembers();
         for (ServerInfo member : clusterMembers) {
+            if (member.getPort() != this.port) {
+                this.nodeConnections.put(member, new NodeConnection(member));
+            }
             System.out.println("Cluster member: " + member.getHost() + ":" + member.getPort());
         }
 
         if (nodeType == NodeType.LEADER) {
             System.out.println("Node ini adalah leader");
-            initializeNodeConnections();
             startHeartbeat();
         } else {
             System.out.printf("Node ini adalah follower dengan timeout %.2f ms%n", heartbeatTimeout);
@@ -85,23 +99,14 @@ public class RaftNode {
         clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
     }
 
-    private void initializeNodeConnections() {
-        for (ServerInfo member : clusterMembers) {
-            // Skip self-connection for leader
-            if (member.getPort() != this.port) {
-                NodeConnection connection = new NodeConnection(member);
-                nodeConnections.put(member, connection);
-            }
-        }
-    }
-
     private void startTimeoutChecker() {
         heartbeatExecutor.scheduleAtFixedRate(() -> {
             long now = System.currentTimeMillis();
-            if (now - lastHeartbeatReceived > heartbeatTimeout) {
-                System.out.printf("No heartbeat received for %.2f ms. Leader might be down!%n", 
-                    (now - lastHeartbeatReceived));
-                nodeType = NodeType.CANDIDATE;
+            if (now - lastHeartbeatReceived > heartbeatTimeout && !inElection) {
+                System.out.println("No heartbeat received for " + (now - lastHeartbeatReceived) + " ms. Starting election!");
+                if(!inElection){
+                    startElection();
+                }
             }
         }, 1000, 1000, MILLISECONDS);
     }
@@ -134,13 +139,14 @@ public class RaftNode {
     private void handleHeartbeat(String message) {
         try {
             HeartbeatMessage heartbeat = gson.fromJson(message, HeartbeatMessage.class);
-            lastHeartbeatReceived = System.currentTimeMillis();
             
             // Only print on even timestamps
             if (lastHeartbeatReceived % 2 == 0) {
+                long now = System.currentTimeMillis();
                 System.out.println("Received heartbeat from leader: " + heartbeat.getLeaderId() + 
-                                 " (term: " + heartbeat.getTerm() + " heartbeat timeout: " + heartbeatTimeout + ")");
+                                 " (term: " + heartbeat.getTerm() + " heartbeat got on " + (now-this.lastHeartbeatReceived) + " , timestamp : "+now+")");
             }
+            lastHeartbeatReceived = System.currentTimeMillis();
             
             // Update term if necessary
             if (heartbeat.getTerm() > currentTerm) {
@@ -148,6 +154,128 @@ public class RaftNode {
             }
         } catch (Exception e) {
             System.err.println("Error processing heartbeat: " + e.getMessage());
+        }
+    }
+
+    private void startElection() {
+        synchronized (voteLock) {
+            inElection = true;
+            nodeType = NodeType.CANDIDATE;
+            currentTerm++;
+            votedFor = address.getHostAddress() + ":" + port;
+            receivedVotes = 1; // Vote for self
+            System.out.println("Starting election for term " + currentTerm);
+        }
+
+        for (ServerInfo member : clusterMembers) {
+            if (member.getPort() != this.port) { // Don't add connection to self
+                nodeConnections.putIfAbsent(member, new NodeConnection(member));
+            }
+        }
+
+        // Send RequestVote RPCs to all other servers
+
+        VoteMessage.VoteRequest voteRequest = new VoteMessage.VoteRequest(
+            votedFor,
+            currentTerm,
+            lastLogIndex,
+            lastLogTerm
+        );
+        System.out.println("node connection size : " + nodeConnections.size());
+        System.out.println("node connection : " + nodeConnections.entrySet());
+
+        for (Map.Entry<ServerInfo, NodeConnection> entry : nodeConnections.entrySet()) {
+            System.out.println("Sending vote request from startelection to " + entry.getKey().getHost() + ":" + entry.getKey().getPort());
+            NodeConnection connection = entry.getValue();
+            if (!connection.isConnected()) {
+                System.out.println("in is not connected");
+                connection.connect();
+            }
+            
+            if (connection.isConnected()) {
+                System.out.println("in is connected");
+                executorService.submit(() -> sendVoteRequest(connection, voteRequest));
+            }
+        }
+    }
+
+    private void sendVoteRequest(NodeConnection connection, VoteMessage.VoteRequest request) {
+        try {
+            System.out.println("Sending vote request to " + connection.getServerInfo().getHost() + ":" + connection.getServerInfo().getPort());
+            String jsonRequest = gson.toJson(request);
+            connection.send(jsonRequest);
+        } catch (Exception e) {
+            System.err.println("Error sending vote request: " + e.getMessage());
+        }
+    }
+
+    private void handleVoteRequest(SocketChannel channel, VoteMessage.VoteRequest request) {
+        System.out.println("Handling vote request");
+        boolean voteGranted = false;
+        synchronized (voteLock) {
+            if (request.getTerm() >= currentTerm &&
+                (votedFor == null || votedFor.equals(request.getCandidateId())) &&
+                request.getLastLogIndex() >= lastLogIndex) {
+                
+                votedFor = request.getCandidateId();
+                currentTerm = request.getTerm();
+                voteGranted = true;
+                System.out.println("Granted vote to " + request.getCandidateId() + " for term " + currentTerm);
+            }
+        }
+        System.out.println("voted for : " + votedFor);
+
+
+        VoteMessage.VoteResponse response = new VoteMessage.VoteResponse(
+            currentTerm,
+            voteGranted,
+            address.getHostAddress() + ":" + port
+        );
+
+        System.out.println("");
+
+
+        try {
+            String jsonResponse = gson.toJson(response);
+            ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
+            channel.write(buffer);
+        } catch (IOException e) {
+            System.err.println("Error sending vote response: " + e.getMessage());
+        }
+    }
+
+    private void handleVoteResponse(VoteMessage.VoteResponse response) {
+        if (nodeType != NodeType.CANDIDATE) {
+            return;
+        }
+
+        if (response.getTerm() > currentTerm) {
+            currentTerm = response.getTerm();
+            nodeType = NodeType.FOLLOWER;
+            votedFor = null;
+            return;
+        }
+
+        if (response.isVoteGranted()) {
+            synchronized (voteLock) {
+                receivedVotes++;
+                System.out.println("Received vote from " + response.getVoterId() + 
+                                 ". Total votes: " + receivedVotes);
+
+                // Check if we have majority
+                if (receivedVotes > clusterMembers.size() / 2) {
+                    becomeLeader();
+                }
+            }
+        }
+    }
+
+    private void becomeLeader() {
+        if (nodeType == NodeType.CANDIDATE) {
+            System.out.println("Becoming leader for term " + currentTerm);
+            nodeType = NodeType.LEADER;
+            votedFor = null;
+            startHeartbeat();
         }
     }
 
@@ -213,13 +341,23 @@ public class RaftNode {
                 buffer.clear();
 
                 String message = new String(data).trim();
-                System.out.println("Message received: " + message);
-
-                // Check if it's a heartbeat message
-                if (message.contains("\"type\":\"HEARTBEAT\"")) {
-                    handleHeartbeat(message);
-                } else {
-                    processClientMessage(channel, message);
+                
+                // Parse message to determine type
+                try {
+                    if (message.contains("\"type\":\"HEARTBEAT\"")) {
+                        handleHeartbeat(message);
+                    } else if (message.contains("\"type\":\"VOTE_REQUEST\"")) {
+                        System.out.println("Received vote request");
+                        VoteMessage.VoteRequest voteRequest = gson.fromJson(message, VoteMessage.VoteRequest.class);
+                        handleVoteRequest(channel, voteRequest);
+                    } else if (message.contains("\"type\":\"VOTE_RESPONSE\"")) {
+                        VoteMessage.VoteResponse voteResponse = gson.fromJson(message, VoteMessage.VoteResponse.class);
+                        handleVoteResponse(voteResponse);
+                    } else {
+                        processClientMessage(channel, message);
+                    }
+                } catch (Exception e) {
+                    System.err.println("Error processing message: " + e.getMessage());
                 }
             }
         } catch (IOException e) {
