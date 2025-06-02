@@ -2,27 +2,22 @@ package com.raft;
 
 import java.util.Scanner;
 
-
 public class Main {
     public static void main(String[] args) {
-        // Alamat dan port node Raft awal yang akan dihubungi
-        // Ini harus sesuai dengan salah satu node Raft yang Anda jalankan di Docker
-        // dan port yang di-expose ke host.
-        String initialRaftHost = "localhost"; // Atau IP Docker host jika App.java di luar
-        int initialRaftPort = 8001; // Ganti dengan port yang sesuai
-
         Scanner scanner = new Scanner(System.in);
-        App raftClient = new App(initialRaftHost, initialRaftPort);
+        App raftClient = null;
 
         System.out.println("Klien Raft Sederhana. Ketik 'quit' untuk keluar.");
-        System.out.println("Perintah yang tersedia: connect, ping, get <key>, set <key> <value>, append <key> <value>, del <key>, disconnect");
+        System.out.println("Perintah yang tersedia: connect <host> <port>, ping, get <key>, set <key> <value>, append <key> <value>, del <key>, disconnect");
 
         String line;
         while (true) {
             System.out.print("> ");
             line = scanner.nextLine().trim();
             if (line.equalsIgnoreCase("quit")) {
-                raftClient.disconnect();
+                if (raftClient != null) {
+                    raftClient.disconnect();
+                }
                 break;
             }
 
@@ -31,35 +26,70 @@ public class Main {
             String response = "Perintah tidak valid atau error.";
 
             switch (command) {
-                case "connect": // Perintah 'connect' sekarang eksplisit
-                    if (raftClient.connect()) {
-                        response = "Berhasil terhubung.";
+                case "connect":
+                    if (parts.length == 3) {
+                        String host = parts[1];
+                        try {
+                            int port = Integer.parseInt(parts[2]);
+                            raftClient = new App(host, port);
+                            if (raftClient.connect()) {
+                                response = "Berhasil terhubung ke " + host + ":" + port;
+                            } else {
+                                response = "Gagal terhubung ke " + host + ":" + port;
+                            }
+                        } catch (NumberFormatException e) {
+                            response = "Port harus berupa angka";
+                        }
                     } else {
-                        response = "Gagal terhubung.";
+                        response = "Penggunaan: connect <host> <port>";
                     }
                     break;
                 case "ping":
-                    response = raftClient.ping();
+                    if (raftClient != null) {
+                        response = raftClient.ping();
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
                     break;
                 case "get":
-                    if (parts.length > 1) response = raftClient.get(parts[1]);
-                    else response = "Penggunaan: get <key>";
+                    if (raftClient != null) {
+                        if (parts.length > 1) response = raftClient.get(parts[1]);
+                        else response = "Penggunaan: get <key>";
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
                     break;
                 case "set":
-                    if (parts.length > 2) response = raftClient.set(parts[1], parts[2]);
-                    else response = "Penggunaan: set <key> <value>";
+                    if (raftClient != null) {
+                        if (parts.length > 2) response = raftClient.set(parts[1], parts[2]);
+                        else response = "Penggunaan: set <key> <value>";
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
                     break;
                 case "append":
-                    if (parts.length > 2) response = raftClient.append(parts[1], parts[2]);
-                    else response = "Penggunaan: append <key> <value>";
+                    if (raftClient != null) {
+                        if (parts.length > 2) response = raftClient.append(parts[1], parts[2]);
+                        else response = "Penggunaan: append <key> <value>";
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
                     break;
                 case "del":
-                    if (parts.length > 1) response = raftClient.del(parts[1]);
-                    else response = "Penggunaan: del <key>";
+                    if (raftClient != null) {
+                        if (parts.length > 1) response = raftClient.del(parts[1]);
+                        else response = "Penggunaan: del <key>";
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
                     break;
-                case "disconnect": // Perintah 'disconnect' eksplisit
-                    raftClient.disconnect();
-                    response = "Koneksi telah ditutup.";
+                case "disconnect":
+                    if (raftClient != null) {
+                        raftClient.disconnect();
+                        response = "Koneksi telah ditutup.";
+                    } else {
+                        response = "Tidak ada koneksi aktif.";
+                    }
                     break;
                 default:
                     response = "Perintah tidak dikenal: " + command;

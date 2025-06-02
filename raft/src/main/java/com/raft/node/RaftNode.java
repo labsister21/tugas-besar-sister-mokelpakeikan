@@ -75,38 +75,51 @@ public class RaftNode {
     // Metode untuk memproses perintah dari klien
     // Ini akan sangat disederhanakan dan tidak melibatkan logika Raft penuh
     private String processClientCommand(String commandLine) {
+        System.out.println("[" + address.getHostAddress() + ":" + port + "] Menerima pesan: " + commandLine);
         String[] parts = commandLine.trim().split("\\s+", 3);
         String command = parts[0].toUpperCase();
 
         // Semua operasi tulis harus ke Leader
         if (!command.equals("PING") && !command.equals("GET") && nodeType != NodeType.LEADER) {
             if (leaderHost != null && leaderPort != 0) {
+                System.out.println("[" + address.getHostAddress() + ":" + port + "] Mengarahkan klien ke leader: " + leaderHost + ":" + leaderPort);
                 return "NOT_LEADER " + leaderHost + ":" + leaderPort;
             } else {
+                System.out.println("[" + address.getHostAddress() + ":" + port + "] Leader tidak diketahui");
                 return "NOT_LEADER UNKNOWN"; // Leader belum diketahui
             }
         }
 
+        System.out.println("[" + address.getHostAddress() + ":" + port + "] Memproses perintah: " + command);
+        String response = "";
         switch (command) {
             case "PING":
-                return "PONG";
+                response = "PONG";
+                break;
             case "SET":
                 if (parts.length == 3) {
                     // Dalam Raft nyata: log, replicate, commit, then apply
                     dataStore.put(parts[1], parts[2]);
-                    return "OK";
+                    response = "OK";
+                    System.out.println("[" + address.getHostAddress() + ":" + port + "] SET " + parts[1] + " = " + parts[2]);
+                } else {
+                    response = "ERROR: Penggunaan SET <key> <value>";
                 }
-                return "ERROR: Penggunaan SET <key> <value>";
+                break;
             case "GET":
                 if (parts.length == 2) {
                     String value = dataStore.get(parts[1]);
-                    return value != null ? "VALUE " + value : "NIL";
+                    response = value != null ? "VALUE " + value : "NIL";
+                    System.out.println("[" + address.getHostAddress() + ":" + port + "] GET " + parts[1] + " -> " + response);
+                } else {
+                    response = "ERROR: Penggunaan GET <key>";
                 }
-                return "ERROR: Penggunaan GET <key>";
-            // Tambahkan case untuk APPEND, DEL, STRLEN
+                break;
             default:
-                return "ERROR: Perintah tidak dikenal";
+                response = "ERROR: Perintah tidak dikenal";
+                System.out.println("[" + address.getHostAddress() + ":" + port + "] Perintah tidak dikenal: " + command);
         }
+        return response;
     }
 
     public NodeType getNodeType() {
