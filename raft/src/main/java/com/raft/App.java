@@ -6,6 +6,11 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.net.UnknownHostException;
+import java.util.Map;
+import java.util.UUID;
+
+import com.raft.rpc.RpcMessage;
+import com.raft.rpc.RpcResponse;
 
 public class App {
     private Socket clientSocket;
@@ -36,64 +41,88 @@ public class App {
         }
     }
 
-    private String sendCommandAndGetResponse(String command) {
+    private RpcResponse sendRequest(String method, Map<String, Object> params) {
         if (clientSocket == null || clientSocket.isClosed()) {
-            if (!connect()) {
-                return "ERROR: Tidak dapat terhubung ke server.";
-            }
+            return new RpcResponse(UUID.randomUUID().toString(), 
+                new RpcResponse.RpcError(-32003, "Not connected to server", null));
         }
-        try {
-            out.println(command);
-            String resp = in.readLine();
-            if (resp != null && resp.startsWith("NOT_LEADER")) {
-                System.out.println("Server merespons: " + resp);
-                handleRedirection(resp);
-                // Coba kirim ulang perintah setelah redirect (ini bisa dibuat rekursif atau dengan loop)
-                // Untuk kesederhanaan, kita minta pengguna mencoba lagi
-                return "REDIRECTED: Silakan coba lagi perintah Anda.";
-            }
-            return resp;
-        } catch (IOException e) {
-            System.err.println("Error saat mengirim/menerima data: " + e.getMessage());
-            disconnect(); // Tutup koneksi jika ada error
-            return "ERROR: " + e.getMessage();
-        }
-    }
 
-    private void handleRedirection(String response) {
-        disconnect(); // Tutup koneksi lama
-        String[] parts = response.split(" ");
-        if (parts.length > 1 && !parts[1].equalsIgnoreCase("UNKNOWN")) {
-            String[] leaderInfo = parts[1].split(":");
-            if (leaderInfo.length == 2) {
-                this.currentLeaderHost = leaderInfo[0];
-                this.currentLeaderPort = Integer.parseInt(leaderInfo[1]);
-                System.out.printf("Leader baru diinformasikan: %s:%d. Mencoba menghubungkan kembali...%n", currentLeaderHost, currentLeaderPort);
-                // connect(); // Bisa langsung connect atau biarkan sendCommand berikutnya yang handle
+        try {
+            String id = UUID.randomUUID().toString();
+            RpcMessage request = new RpcMessage(id, method, params);
+            out.println(request.toJson());
+            
+            String response = in.readLine();
+            if (response == null) {
+                disconnect();
+                return new RpcResponse(id, 
+                    new RpcResponse.RpcError(-32002, "Connection closed by server", null));
             }
-        } else {
-            System.err.println("Tidak bisa mendapatkan alamat leader baru dari respons.");
+
+            RpcResponse rpcResponse = RpcResponse.fromJson(response);
+            
+            // Check if we need to redirect to leader
+            if (rpcResponse.getError() != null && rpcResponse.getError().getCode() == -32000) {
+                Map<String, Object> leaderInfo = (Map<String, Object>) rpcResponse.getError().getData();
+                String newLeaderHost = (String) leaderInfo.get("leader_host");
+                int newLeaderPort = ((Number) leaderInfo.get("leader_port")).intValue();
+                
+                // Update leader information
+                this.currentLeaderHost = newLeaderHost;
+                this.currentLeaderPort = newLeaderPort;
+                
+                return new RpcResponse(id, 
+                    new RpcResponse.RpcError(-32000, 
+                        String.format("Please reconnect to leader at %s:%d", newLeaderHost, newLeaderPort), 
+                        leaderInfo));
+            }
+            
+            return rpcResponse;
+        } catch (IOException e) {
+            disconnect();
+            return new RpcResponse(UUID.randomUUID().toString(), 
+                new RpcResponse.RpcError(-32002, "Error communicating with server: " + e.getMessage(), null));
         }
     }
 
     public String ping() {
-        return sendCommandAndGetResponse("PING");
+        RpcResponse response = sendRequest("ping", null);
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        return (String) response.getResult();
     }
 
     public String get(String key) {
-        return sendCommandAndGetResponse("GET " + key);
+        RpcResponse response = sendRequest("get", Map.of("key", key));
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        return response.getResult() != null ? response.getResult().toString() : "NIL";
     }
 
     public String set(String key, String value) {
-        return sendCommandAndGetResponse("SET " + key + " " + value);
+        RpcResponse response = sendRequest("set", Map.of("key", key, "value", value));
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        return "OK";
     }
 
     public String append(String key, String value) {
-        return sendCommandAndGetResponse("APPEND " + key + " " + value);
+        RpcResponse response = sendRequest("append", Map.of("key", key, "value", value));
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        return "OK";
     }
 
     public String del(String key) {
-        return sendCommandAndGetResponse("DEL " + key);
+        RpcResponse response = sendRequest("del", Map.of("key", key));
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        return "OK";
     }
 
     public void disconnect() {
@@ -105,5 +134,13 @@ public class App {
         } catch (IOException e) {
             System.err.println("Error saat menutup koneksi: " + e.getMessage());
         }
+    }
+
+    public String getCurrentLeaderHost() {
+        return currentLeaderHost;
+    }
+
+    public int getCurrentLeaderPort() {
+        return currentLeaderPort;
     }
 }

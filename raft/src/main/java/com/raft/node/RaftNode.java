@@ -1,170 +1,231 @@
 package com.raft.node;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
 import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
-import java.util.Dictionary;
-import java.util.Hashtable;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
+import com.raft.rpc.RpcMessage;
+import com.raft.rpc.RpcResponse;
 
 public class RaftNode {
-    private InetAddress address;
-    private int port;
-    private NodeType nodeType;
-    private List<Log> logs;
-    private ServerSocket serverSocket;
-    private Dictionary<String, String> dataStore; // State machine
-    private volatile boolean running = true;
+    private final InetAddress address;
+    private final int port;
+    private final NodeType nodeType;
+    private final List<ServerInfo> clusterMembers;
+    private final Map<String, String> dataStore;
+    private final Map<SocketChannel, ByteBuffer> clientBuffers;
+    private final ExecutorService executorService;
+    private ServerSocketChannel serverSocket;
+    private Selector selector;
+    private volatile boolean running;
 
-    // Informasi leader (untuk redirect) - ini akan diupdate oleh algoritma Raft
-    private String leaderHost = null; // Misalnya "localhost" atau IP
-    private int leaderPort = 0;
-
+    // Leader information
+    private ServerInfo leaderInfo;
 
     public RaftNode(String hostAddress, int port, NodeType nodeType) throws IOException {
         this.address = InetAddress.getByName(hostAddress);
         this.port = port;
         this.nodeType = nodeType;
-        this.logs = new ArrayList<>();
-        this.dataStore = new Hashtable<>(); // Inisialisasi state machine
-        this.serverSocket = new ServerSocket(this.port, 50, this.address);
-        System.out.printf("RaftNode (%s) berjalan di %s:%d%n", nodeType, this.address.getHostAddress(), this.port);
-
-        // Inisialisasi leader hint (jika node ini adalah leader awal atau tahu siapa leader)
+        this.dataStore = new ConcurrentHashMap<>();
+        this.clientBuffers = new ConcurrentHashMap<>();
+        this.executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+        this.clusterMembers = new ArrayList<>();
+        
+        // Initialize fixed cluster members (4 nodes)
+        initializeClusterMembers();
+        for (ServerInfo member : clusterMembers) {
+            System.out.println("Cluster member: " + member.getHost() + ":" + member.getPort());
+        }
+        // Set leader info if this node is the leader
         if (nodeType == NodeType.LEADER) {
-            this.leaderHost = this.address.getHostAddress();
-            this.leaderPort = this.port;
+            System.out.println("Node ini adalah leader");
+            this.leaderInfo = new ServerInfo(hostAddress, port, NodeType.LEADER);
         }
     }
 
-    public void startServer() {
-        System.out.println("Server RaftNode mulai mendengarkan koneksi...");
+    private void initializeClusterMembers() {
+        // Add all 4 nodes to the cluster
+        clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.LEADER));
+        clusterMembers.add(new ServerInfo("localhost", 8002, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("localhost", 8003, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
+    }
+
+    public void startServer() throws IOException {
+        selector = Selector.open();
+        serverSocket = ServerSocketChannel.open();
+        serverSocket.bind(new InetSocketAddress(address, port));
+        serverSocket.configureBlocking(false);
+        serverSocket.register(selector, SelectionKey.OP_ACCEPT);
+        
+        running = true;
+        System.out.printf("RaftNode (%s) berjalan di %s:%d%n", nodeType, address.getHostAddress(), port);
+
         while (running) {
             try {
-                Socket clientSocket = serverSocket.accept();
-                System.out.println("Klien terhubung: " + clientSocket.getRemoteSocketAddress());
-                // Buat thread baru untuk menangani klien ini
-                new ClientHandler(clientSocket, this).start();
-            } catch (IOException e) {
-                if (!running) {
-                    System.out.println("Server socket ditutup.");
-                    break;
+                selector.select();
+                Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
+
+                while (keys.hasNext()) {
+                    SelectionKey key = keys.next();
+                    keys.remove();
+
+                    if (!key.isValid()) {
+                        continue;
+                    }
+
+                    if (key.isAcceptable()) {
+                        accept(key);
+                    } else if (key.isReadable()) {
+                        read(key);
+                    }
                 }
-                System.err.println("Error saat menerima koneksi klien: " + e.getMessage());
+            } catch (IOException e) {
+                System.err.println("Error dalam event loop: " + e.getMessage());
             }
+        }
+    }
+
+    private void accept(SelectionKey key) throws IOException {
+        ServerSocketChannel serverChannel = (ServerSocketChannel) key.channel();
+        SocketChannel clientChannel = serverChannel.accept();
+        clientChannel.configureBlocking(false);
+        clientChannel.register(selector, SelectionKey.OP_READ);
+        clientBuffers.put(clientChannel, ByteBuffer.allocate(1024));
+        System.out.println("Klien terhubung: " + clientChannel.getRemoteAddress());
+    }
+
+    private void read(SelectionKey key) {
+        SocketChannel clientChannel = (SocketChannel) key.channel();
+        ByteBuffer buffer = clientBuffers.get(clientChannel);
+        
+        try {
+            int bytesRead = clientChannel.read(buffer);
+            if (bytesRead == -1) {
+                closeConnection(clientChannel);
+                return;
+            }
+
+            if (bytesRead > 0) {
+                buffer.flip();
+                byte[] data = new byte[buffer.limit()];
+                buffer.get(data);
+                buffer.clear();
+
+                String message = new String(data).trim();
+                System.out.println("Message: " + message);
+                processClientMessage(clientChannel, message);
+            }
+        } catch (IOException e) {
+            closeConnection(clientChannel);
+        }
+    }
+
+    private void processClientMessage(SocketChannel clientChannel, String message) {
+        executorService.submit(() -> {
+            try {
+                RpcMessage rpcMessage = RpcMessage.fromJson(message);
+                RpcResponse response;
+                
+                if (nodeType != NodeType.LEADER) {
+                    // If not leader, return error with leader information
+                    ServerInfo leader = clusterMembers.stream()
+                        .filter(s -> s.getType() == NodeType.LEADER)
+                        .findFirst()
+                        .orElse(null);
+
+                    if (leader != null) {
+                        response = new RpcResponse(rpcMessage.getId(), 
+                            new RpcResponse.RpcError(-32000, 
+                                "Not leader. Please connect to leader.", 
+                                Map.of("leader_host", leader.getHost(), 
+                                      "leader_port", leader.getPort())));
+                    } else {
+                        response = new RpcResponse(rpcMessage.getId(),
+                            new RpcResponse.RpcError(-32001, "Leader not found", null));
+                    }
+                } else {
+                    // Process the command if this is the leader
+                    response = processCommand(rpcMessage);
+                }
+
+                // Send response
+                sendResponse(clientChannel, response);
+            } catch (Exception e) {
+                System.err.println("Error processing message: " + e.getMessage());
+            }
+        });
+    }
+
+    private RpcResponse processCommand(RpcMessage message) {
+        String method = message.getMethod();
+        Map<String, Object> params = (Map<String, Object>) message.getParams();
+
+        switch (method) {
+            case "ping":
+                return new RpcResponse(message.getId(), "pong");
+                
+            case "get":
+                String key = (String) params.get("key");
+                String value = dataStore.get(key);
+                return new RpcResponse(message.getId(), value != null ? value : null);
+                
+            case "set":
+                key = (String) params.get("key");
+                value = (String) params.get("value");
+                dataStore.put(key, value);
+                return new RpcResponse(message.getId(), true);
+                
+            default:
+                return new RpcResponse(message.getId(), 
+                    new RpcResponse.RpcError(-32601, "Method not found", null));
+        }
+    }
+
+    private void sendResponse(SocketChannel channel, RpcResponse response) {
+        try {
+            String jsonResponse = response.toJson();
+            ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
+            channel.write(buffer);
+        } catch (IOException e) {
+            System.err.println("Error sending response: " + e.getMessage());
+            closeConnection(channel);
+        }
+    }
+
+    private void closeConnection(SocketChannel channel) {
+        try {
+            clientBuffers.remove(channel);
+            channel.close();
+        } catch (IOException e) {
+            System.err.println("Error closing connection: " + e.getMessage());
         }
     }
 
     public void stopServer() {
         running = false;
+        executorService.shutdown();
         try {
-            if (serverSocket != null && !serverSocket.isClosed()) {
+            if (selector != null && selector.isOpen()) {
+                selector.close();
+            }
+            if (serverSocket != null && serverSocket.isOpen()) {
                 serverSocket.close();
             }
         } catch (IOException e) {
-            System.err.println("Error saat menutup server socket: " + e.getMessage());
-        }
-    }
-
-    // Metode untuk memproses perintah dari klien
-    // Ini akan sangat disederhanakan dan tidak melibatkan logika Raft penuh
-    private String processClientCommand(String commandLine) {
-        System.out.println("[" + address.getHostAddress() + ":" + port + "] Menerima pesan: " + commandLine);
-        String[] parts = commandLine.trim().split("\\s+", 3);
-        String command = parts[0].toUpperCase();
-
-        // Semua operasi tulis harus ke Leader
-        if (!command.equals("PING") && !command.equals("GET") && nodeType != NodeType.LEADER) {
-            if (leaderHost != null && leaderPort != 0) {
-                System.out.println("[" + address.getHostAddress() + ":" + port + "] Mengarahkan klien ke leader: " + leaderHost + ":" + leaderPort);
-                return "NOT_LEADER " + leaderHost + ":" + leaderPort;
-            } else {
-                System.out.println("[" + address.getHostAddress() + ":" + port + "] Leader tidak diketahui");
-                return "NOT_LEADER UNKNOWN"; // Leader belum diketahui
-            }
-        }
-
-        System.out.println("[" + address.getHostAddress() + ":" + port + "] Memproses perintah: " + command);
-        String response = "";
-        switch (command) {
-            case "PING":
-                response = "PONG";
-                break;
-            case "SET":
-                if (parts.length == 3) {
-                    // Dalam Raft nyata: log, replicate, commit, then apply
-                    dataStore.put(parts[1], parts[2]);
-                    response = "OK";
-                    System.out.println("[" + address.getHostAddress() + ":" + port + "] SET " + parts[1] + " = " + parts[2]);
-                } else {
-                    response = "ERROR: Penggunaan SET <key> <value>";
-                }
-                break;
-            case "GET":
-                if (parts.length == 2) {
-                    String value = dataStore.get(parts[1]);
-                    response = value != null ? "VALUE " + value : "NIL";
-                    System.out.println("[" + address.getHostAddress() + ":" + port + "] GET " + parts[1] + " -> " + response);
-                } else {
-                    response = "ERROR: Penggunaan GET <key>";
-                }
-                break;
-            default:
-                response = "ERROR: Perintah tidak dikenal";
-                System.out.println("[" + address.getHostAddress() + ":" + port + "] Perintah tidak dikenal: " + command);
-        }
-        return response;
-    }
-
-    public NodeType getNodeType() {
-        return nodeType;
-    }
-
-    // Inner class untuk menangani setiap koneksi klien dalam thread terpisah
-    private static class ClientHandler extends Thread {
-        private Socket clientSocket;
-        private RaftNode raftNode;
-        private PrintWriter out;
-        private BufferedReader in;
-
-        public ClientHandler(Socket socket, RaftNode node) {
-            this.clientSocket = socket;
-            this.raftNode = node;
-        }
-
-        public void run() {
-            try {
-                out = new PrintWriter(clientSocket.getOutputStream(), true);
-                in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-
-                String inputLine;
-                while ((inputLine = in.readLine()) != null) {
-                    System.out.println("Diterima dari klien " + clientSocket.getRemoteSocketAddress() + ": " + inputLine);
-                    if ("QUIT".equalsIgnoreCase(inputLine)) { // Tambahkan perintah QUIT untuk klien
-                        out.println("BYE");
-                        break;
-                    }
-                    String response = raftNode.processClientCommand(inputLine);
-                    out.println(response);
-                }
-            } catch (IOException e) {
-                System.err.println("Error pada ClientHandler: " + e.getMessage());
-            } finally {
-                try {
-                    if (in != null) in.close();
-                    if (out != null) out.close();
-                    if (clientSocket != null) clientSocket.close();
-                } catch (IOException e) {
-                    System.err.println("Error saat menutup stream/socket klien: " + e.getMessage());
-                }
-                System.out.println("Koneksi dengan klien " + clientSocket.getRemoteSocketAddress() + " ditutup.");
-            }
+            System.err.println("Error closing server: " + e.getMessage());
         }
     }
 }

@@ -1,7 +1,10 @@
+com\raft\node\ServerInfo.class
 com\raft\RaftServer.class
-com\raft\node\RaftNode$ClientHandler.class
 com\raft\node\RaftNode.class
+com\raft\rpc\RpcResponse.class
 com\raft\App.class
+com\raft\rpc\RpcResponse$RpcError.class
 com\raft\node\NodeType.class
+com\raft\rpc\RpcMessage.class
 com\raft\node\Log.class
 com\raft\Main.class
