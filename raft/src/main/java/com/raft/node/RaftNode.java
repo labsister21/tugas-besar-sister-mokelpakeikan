@@ -122,7 +122,12 @@ public class RaftNode {
                 
                 // Try to connect if not connected
                 if (!connection.isConnected()) {
-                    connection.connect();
+                    try{
+                        boolean connected = connection.connect();
+
+                    } catch (IOException e) {
+                        System.out.println("Error connecting to " + entry.getKey() + ": " + e.getMessage());
+                    }
                 }
                 
                 // Send heartbeat if connected
@@ -143,8 +148,10 @@ public class RaftNode {
             // Only print on even timestamps
             if (lastHeartbeatReceived % 2 == 0) {
                 long now = System.currentTimeMillis();
+                System.out.println("--------------------------------");
                 System.out.println("Received heartbeat from leader: " + heartbeat.getLeaderId() + 
                                  " (term: " + heartbeat.getTerm() + " heartbeat got on " + (now-this.lastHeartbeatReceived) + " , timestamp : "+now+")");
+                System.out.println("--------------------------------");
             }
             lastHeartbeatReceived = System.currentTimeMillis();
             
@@ -181,29 +188,59 @@ public class RaftNode {
             lastLogIndex,
             lastLogTerm
         );
-        System.out.println("node connection size : " + nodeConnections.size());
-        System.out.println("node connection : " + nodeConnections.entrySet());
 
         for (Map.Entry<ServerInfo, NodeConnection> entry : nodeConnections.entrySet()) {
-            System.out.println("Sending vote request from startelection to " + entry.getKey().getHost() + ":" + entry.getKey().getPort());
             NodeConnection connection = entry.getValue();
             if (!connection.isConnected()) {
-                System.out.println("in is not connected");
-                connection.connect();
+                try {
+                    boolean Connected = connection.connect();
+                    if (!Connected) {
+                        SocketChannel peerChannel = connection.getChannel();
+                        peerChannel.register(this.selector, SelectionKey.OP_CONNECT, voteRequest); // Attach voteRequest
+                        this.selector.wakeup();
+                        continue;
+                    }
+                } catch (IOException e) {
+                    System.err.println("Error starting connection to " + entry.getKey() + ": " + e.getMessage());
+                    continue;
+                }
             }
-            
+
             if (connection.isConnected()) {
-                System.out.println("in is connected");
                 executorService.submit(() -> sendVoteRequest(connection, voteRequest));
             }
         }
+
+        // Set timer untuk election
+        heartbeatExecutor.schedule(() -> {
+            if (nodeType == NodeType.CANDIDATE) {
+                System.out.println("Election timeout - reverting to follower");
+                synchronized (voteLock) {
+                    nodeType = NodeType.FOLLOWER;
+                    inElection = false;
+                }
+            }
+        }, 10000, MILLISECONDS);
     }
 
     private void sendVoteRequest(NodeConnection connection, VoteMessage.VoteRequest request) {
         try {
-            System.out.println("Sending vote request to " + connection.getServerInfo().getHost() + ":" + connection.getServerInfo().getPort());
             String jsonRequest = gson.toJson(request);
             connection.send(jsonRequest);
+            
+            // Register channel untuk membaca response
+            SocketChannel channel = connection.getChannel();
+            channel.configureBlocking(false);
+            SelectionKey key = channel.keyFor(selector);
+            if (key == null) {
+                channel.register(selector, SelectionKey.OP_READ);
+            }else if (!key.isValid()){
+                channel.register(selector, SelectionKey.OP_READ);
+            }else if ((key.interestOps() & SelectionKey.OP_READ) == 0){
+                key.interestOps(key.interestOps() | SelectionKey.OP_READ);
+            }
+            // clientBuffers.put(channel, ByteBuffer.allocate(1024));
+            
         } catch (Exception e) {
             System.err.println("Error sending vote request: " + e.getMessage());
         }
@@ -213,15 +250,31 @@ public class RaftNode {
         System.out.println("Handling vote request");
         boolean voteGranted = false;
         synchronized (voteLock) {
-            if (request.getTerm() >= currentTerm &&
-                (votedFor == null || votedFor.equals(request.getCandidateId())) &&
-                request.getLastLogIndex() >= lastLogIndex) {
-                
-                votedFor = request.getCandidateId();
+            if (request.getTerm() < currentTerm) {
+                voteGranted = false;
+            } 
+            else if (request.getTerm() > currentTerm) {
                 currentTerm = request.getTerm();
-                voteGranted = true;
-                System.out.println("Granted vote to " + request.getCandidateId() + " for term " + currentTerm);
+                nodeType = NodeType.FOLLOWER;
+                votedFor = null;
+                if (request.getLastLogIndex() >= lastLogIndex && request.getLastLogTerm() >= lastLogTerm) {
+                    votedFor = request.getCandidateId();
+                    voteGranted = true;
+                } else {
+                    voteGranted = false;
+                }
+            } 
+            else { // request.getTerm() == currentTerm
+                if ((votedFor == null || votedFor.equals(request.getCandidateId())) &&
+                   (request.getLastLogIndex() >= lastLogIndex && request.getLastLogTerm() >= lastLogTerm)) {
+                    
+                    votedFor = request.getCandidateId();
+                    voteGranted = true;
+                } else {
+                    voteGranted = false;
+                }
             }
+                            
         }
         System.out.println("voted for : " + votedFor);
 
@@ -232,19 +285,25 @@ public class RaftNode {
             address.getHostAddress() + ":" + port
         );
 
-        System.out.println("");
+        long now = System.currentTimeMillis();
+        System.out.println("--------------------------------");
+        System.out.println("created vote response for " + request.getCandidateId() + " response : " + voteGranted + " at " + now/1000 + " s with response type : " + response.getType());
 
 
         try {
             String jsonResponse = gson.toJson(response);
             ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
             channel.write(buffer);
+            System.out.println("--------------------------------");
+            System.out.println("Write Buffer to " + channel.getRemoteAddress() + " done");
+
         } catch (IOException e) {
             System.err.println("Error sending vote response: " + e.getMessage());
         }
     }
 
     private void handleVoteResponse(VoteMessage.VoteResponse response) {
+        System.out.println("handling vote response from " + response.getVoterId() + " with term " + response.getTerm());
         if (nodeType != NodeType.CANDIDATE) {
             return;
         }
@@ -262,8 +321,16 @@ public class RaftNode {
                 System.out.println("Received vote from " + response.getVoterId() + 
                                  ". Total votes: " + receivedVotes);
 
-                // Check if we have majority
-                if (receivedVotes > clusterMembers.size() / 2) {
+                // Hitung node yang aktif (tidak termasuk node yang down)
+                int activeNodes = 1; // Diri sendiri
+                for (Map.Entry<ServerInfo, NodeConnection> entry : nodeConnections.entrySet()) {
+                    if (entry.getValue().isConnected()) {
+                        activeNodes++;
+                    }
+                }
+                
+                // Check if we have majority dari node yang aktif
+                if (receivedVotes > activeNodes / 2) {
                     becomeLeader();
                 }
             }
@@ -286,10 +353,9 @@ public class RaftNode {
         serverSocket.configureBlocking(false);
         serverSocket.register(selector, SelectionKey.OP_ACCEPT);
         
-        running = true;
         System.out.printf("RaftNode (%s) berjalan di %s:%d%n", nodeType, address.getHostAddress(), port);
 
-        while (running) {
+        while (true) {
             try {
                 selector.select();
                 Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
@@ -306,12 +372,54 @@ public class RaftNode {
                         accept(key);
                     } else if (key.isReadable()) {
                         read(key);
+                    }else if (key.isConnectable()) {
+                        handleConnect(key);
                     }
                 }
             } catch (IOException e) {
                 System.err.println("Error dalam event loop: " + e.getMessage());
             }
         }
+    }
+    
+    private void handleConnect(SelectionKey key) {
+        SocketChannel channel = (SocketChannel) key.channel();
+        NodeConnection connection = findNodeConnectionForChannel(channel);
+        try {
+            if (channel.finishConnect()) {
+                System.out.println("Successfully connected to " + connection.getServerInfo());
+                if (connection != null) {
+                    connection.setConnected(true);
+                }
+                key.interestOps(0);
+                
+                if (key.attachment() instanceof VoteMessage.VoteRequest) {
+                    executorService.submit(() -> sendVoteRequest(connection, (VoteMessage.VoteRequest) key.attachment()));
+                } else {
+                    channel.register(this.selector, SelectionKey.OP_READ);
+                    clientBuffers.putIfAbsent(channel, ByteBuffer.allocate(1024));
+                    this.selector.wakeup();
+                }
+            } else {
+                // Koneksi gagal
+                System.err.println("Failed to finish connect to " + (connection != null ? connection.getServerInfo() : channel.getRemoteAddress()));
+                key.cancel();
+                if (connection != null) connection.disconnect();
+            }
+        } catch (IOException e) {
+            System.err.println("Exception during finishConnect to " + (connection != null ? connection.getServerInfo() : getRemoteAddressSafe(channel)) + ": " + e.getMessage());
+            key.cancel();
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private NodeConnection findNodeConnectionForChannel(SocketChannel channel) {
+        for (NodeConnection nc : nodeConnections.values()) {
+            if (nc.getChannel() == channel) { // Perbandingan referensi, pastikan ini benar
+                return nc;
+            }
+        }
+        return null;
     }
 
     private void accept(SelectionKey key) throws IOException {
@@ -330,6 +438,9 @@ public class RaftNode {
         try {
             int bytesRead = channel.read(buffer);
             if (bytesRead == -1) {
+                System.out.println("--------------------------------");
+                System.out.println("bytes read : " + bytesRead + " connection closed from " + channel.getRemoteAddress());
+                System.out.println("--------------------------------");
                 closeConnection(channel);
                 return;
             }
@@ -341,16 +452,21 @@ public class RaftNode {
                 buffer.clear();
 
                 String message = new String(data).trim();
+                System.out.println("--------------------------------");
+                System.out.println("message recieved from " + channel.getRemoteAddress() + " : " + message);
+                System.out.println("--------------------------------");
                 
                 // Parse message to determine type
                 try {
                     if (message.contains("\"type\":\"HEARTBEAT\"")) {
                         handleHeartbeat(message);
                     } else if (message.contains("\"type\":\"VOTE_REQUEST\"")) {
-                        System.out.println("Received vote request");
+                        inElection = true;
+                        System.out.println("Received vote request from " + channel.getRemoteAddress());
                         VoteMessage.VoteRequest voteRequest = gson.fromJson(message, VoteMessage.VoteRequest.class);
                         handleVoteRequest(channel, voteRequest);
                     } else if (message.contains("\"type\":\"VOTE_RESPONSE\"")) {
+                        System.out.println("Received vote response from " + channel.getRemoteAddress());
                         VoteMessage.VoteResponse voteResponse = gson.fromJson(message, VoteMessage.VoteResponse.class);
                         handleVoteResponse(voteResponse);
                     } else {

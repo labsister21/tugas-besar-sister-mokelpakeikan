@@ -22,24 +22,39 @@ public class NodeConnection {
         this.gson = new Gson();
     }
 
-    public void connect() {
-        try {
-            channel = SocketChannel.open();
-            channel.configureBlocking(false);
-            channel.connect(new InetSocketAddress(serverInfo.getHost(), serverInfo.getPort()));
+    public boolean connect() throws IOException {
+        // try {
+        //     channel = SocketChannel.open();
+        //     channel.configureBlocking(false);
+        //     channel.connect(new InetSocketAddress(serverInfo.getHost(), serverInfo.getPort()));
+        //     // // Wait for connection to complete
+        //     // while (!channel.finishConnect()) {
+        //     //     Thread.sleep(100);
+        //     // }
             
-            // Wait for connection to complete
-            while (!channel.finishConnect()) {
-                Thread.sleep(100);
-            }
-            
-            isConnected.set(true);
-            System.out.println("Connected to " + serverInfo.getHost() + ":" + serverInfo.getPort());
-        } catch (Exception e) {
-            System.err.println("Failed to connect to " + serverInfo.getHost() + ":" + 
-                             serverInfo.getPort() + ": " + e.getMessage());
-            disconnect();
+        //     isConnected.set(true);
+        //     System.out.println("Connected to " + serverInfo.getHost() + ":" + serverInfo.getPort());
+        // } catch (Exception e) {
+        //     System.err.println("Failed to connect to " + serverInfo.getHost() + ":" + 
+        //                      serverInfo.getPort() + ": " + e.getMessage());
+        //     disconnect();
+        // }
+        if (isConnected() || (this.channel != null && this.channel.isConnected())) {
+            return true; 
         }
+        if (this.channel == null || !this.channel.isOpen()) {
+            this.channel = SocketChannel.open();
+            this.channel.configureBlocking(false); 
+        }
+        
+        boolean success = this.channel.connect(new InetSocketAddress(serverInfo.getHost(), serverInfo.getPort()));
+        
+        if (success) {
+            isConnected.set(true);
+        } else {
+            isConnected.set(false); 
+        }
+        return success; 
     }
 
     public void disconnect() {
@@ -98,5 +113,9 @@ public class NodeConnection {
 
     public ServerInfo getServerInfo() {
         return serverInfo;
+    }
+
+    public void setConnected(boolean connected) {
+        isConnected.set(connected);
     }
 } 
