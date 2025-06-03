@@ -3,7 +3,7 @@ package com.raft.node;
 public class ServerInfo {
     private final String host;
     private final int port;
-    private final NodeType type;
+    private NodeType type;
     private boolean isConnected;
 
     public ServerInfo(String host, int port, NodeType type) {
@@ -31,6 +31,10 @@ public class ServerInfo {
 
     public void setConnected(boolean connected) {
         isConnected = connected;
+    }
+
+    public void setType(NodeType type) {
+        this.type = type;
     }
 
     @Override

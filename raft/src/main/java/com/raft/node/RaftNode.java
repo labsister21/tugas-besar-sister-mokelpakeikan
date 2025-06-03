@@ -93,7 +93,7 @@ public class RaftNode {
     }
 
     private void initializeClusterMembers() {
-        clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.LEADER));
+        clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.FOLLOWER));
         clusterMembers.add(new ServerInfo("localhost", 8002, NodeType.FOLLOWER));
         clusterMembers.add(new ServerInfo("localhost", 8003, NodeType.FOLLOWER));
         clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
@@ -355,6 +355,15 @@ public class RaftNode {
         if (nodeType == NodeType.CANDIDATE) {
             System.out.println("Becoming leader for term " + currentTerm);
             nodeType = NodeType.LEADER;
+
+            // Update the corresponding ServerInfo in clusterMembers
+            for (ServerInfo member : clusterMembers) {
+                if (member.getPort() == this.port) {
+                    member.setType(NodeType.LEADER);
+                    System.out.println("Updated cluster member status to LEADER: " + member);
+                }
+            }
+            
             votedFor = null;
             startHeartbeat();
         }
