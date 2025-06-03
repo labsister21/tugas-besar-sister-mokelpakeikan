@@ -29,7 +29,7 @@ public class NodeConnection {
             channel.connect(new InetSocketAddress(serverInfo.getHost(), serverInfo.getPort()));
             // Wait for connection to complete
             while (!channel.finishConnect()) {
-                Thread.sleep(100);
+                Thread.yield();
             }
             
             isConnected.set(true);
