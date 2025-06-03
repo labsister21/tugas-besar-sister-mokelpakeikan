@@ -93,10 +93,10 @@ public class RaftNode {
     }
 
     private void initializeClusterMembers() {
-        clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.LEADER));
-        clusterMembers.add(new ServerInfo("localhost", 8002, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("localhost", 8003, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node1", 8001, NodeType.LEADER));
+        clusterMembers.add(new ServerInfo("raft-node2", 8002, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node3", 8003, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node4", 8004, NodeType.FOLLOWER));
     }
 
     private void startTimeoutChecker() {

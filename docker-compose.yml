@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  raft-node1:
+    build: .
+    container_name: raft-node1
+    networks:
+      - raft-network
+    ports:
+      - "8001:8001"
+    command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node1", "8001", "LEADER"]
+
+  raft-node2:
+    build: .
+    container_name: raft-node2
+    networks:
+      - raft-network
+    ports:
+      - "8002:8002"
+    command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node2", "8002", "FOLLOWER"]
+
+  raft-node3:
+    build: .
+    container_name: raft-node3
+    networks:
+      - raft-network
+    ports:
+      - "8003:8003"
+    command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node3", "8003", "FOLLOWER"]
+
+  raft-node4:
+    build: .
+    container_name: raft-node4
+    networks:
+      - raft-network
+    ports:
+      - "8004:8004"
+    command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node4", "8004", "FOLLOWER"]
+
+  raft-client:
+    build: .
+    container_name: raft-client
+    networks:
+      - raft-network
+    depends_on:
+      - raft-node1
+      - raft-node2
+      - raft-node3
+      - raft-node4
+    command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.Main", "raft-node1", "8001"]
+    stdin_open: true  # Untuk input interaktif
+    tty: true        # Untuk terminal interaktif
+
+networks:
+  raft-network:
+    driver: bridge 
