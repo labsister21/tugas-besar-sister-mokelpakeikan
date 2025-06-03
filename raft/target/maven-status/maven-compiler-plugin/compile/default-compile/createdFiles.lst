@@ -1,9 +1,15 @@
 com\raft\node\ServerInfo.class
 com\raft\RaftServer.class
+com\raft\rpc\VoteMessage$VoteRequest.class
 com\raft\rpc\RpcResponse.class
+com\raft\rpc\VoteMessage$VoteResponse.class
 com\raft\node\NodeConnection.class
+com\raft\rpc\HeartbeatMessage.class
 com\raft\App.class
 com\raft\rpc\RpcResponse$RpcError.class
-com\raft\node\NodeType.class
 com\raft\node\Log.class
+com\raft\node\RaftNode.class
+com\raft\rpc\VoteMessage.class
+com\raft\node\NodeType.class
+com\raft\rpc\RpcMessage.class
 com\raft\Main.class

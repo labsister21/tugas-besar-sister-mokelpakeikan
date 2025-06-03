@@ -123,7 +123,7 @@ public class RaftNode {
                 // Try to connect if not connected
                 if (!connection.isConnected()) {
                     try{
-                        boolean connected = connection.connect();
+                        connection.connect();
 
                     } catch (IOException e) {
                         System.out.println("Error connecting to " + entry.getKey() + ": " + e.getMessage());
@@ -193,13 +193,15 @@ public class RaftNode {
             NodeConnection connection = entry.getValue();
             if (!connection.isConnected()) {
                 try {
-                    boolean Connected = connection.connect();
-                    if (!Connected) {
-                        SocketChannel peerChannel = connection.getChannel();
-                        peerChannel.register(this.selector, SelectionKey.OP_CONNECT, voteRequest); // Attach voteRequest
-                        this.selector.wakeup();
-                        continue;
-                    }
+                    // boolean Connected = connection.connect();
+                    // if (!Connected) {
+                    //     SocketChannel peerChannel = connection.getChannel();
+                    //     peerChannel.register(this.selector, SelectionKey.OP_CONNECT, voteRequest); // Attach voteRequest
+                    //     this.selector.wakeup();
+                    //     continue;
+                    // }
+                    connection.connect();
+                    
                 } catch (IOException e) {
                     System.err.println("Error starting connection to " + entry.getKey() + ": " + e.getMessage());
                     continue;
@@ -402,12 +404,12 @@ public class RaftNode {
                 }
             } else {
                 // Koneksi gagal
-                System.err.println("Failed to finish connect to " + (connection != null ? connection.getServerInfo() : channel.getRemoteAddress()));
+                // System.err.println("Failed to finish connect to " + (connection != null ? connection.getServerInfo() : channel.getRemoteAddress()));
                 key.cancel();
                 if (connection != null) connection.disconnect();
             }
         } catch (IOException e) {
-            System.err.println("Exception during finishConnect to " + (connection != null ? connection.getServerInfo() : getRemoteAddressSafe(channel)) + ": " + e.getMessage());
+            // System.err.println("Exception during finishConnect to " + (connection != null ? connection.getServerInfo() : getRemoteAddressSafe(channel)) + ": " + e.getMessage());
             key.cancel();
             if (connection != null) connection.disconnect();
         }
