@@ -8,7 +8,8 @@ import java.net.Socket;
 import java.net.UnknownHostException;
 import java.util.Map;
 import java.util.UUID;
-
+import java.util.List;     
+import java.util.ArrayList; 
 import com.raft.rpc.RpcMessage;
 import com.raft.rpc.RpcResponse;
 
@@ -142,5 +143,47 @@ public class App {
 
     public int getCurrentLeaderPort() {
         return currentLeaderPort;
+    }
+
+    public String addServer(String host, int port) {
+        RpcResponse response = sendRequest("add_server", Map.of("host", host, "port", port));
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        boolean success = (Boolean) response.getResult();
+        return success ? "Server added successfully" : "Failed to add server";
+    }
+
+    public String removeServer(String host, int port) {
+        RpcResponse response = sendRequest("remove_server", Map.of("host", host, "port", port));
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        boolean success = (Boolean) response.getResult();
+        return success ? "Server removed successfully" : "Failed to remove server";
+    }
+
+    public String listServers() {
+        RpcResponse response = sendRequest("list_servers", null);
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        
+        List<Map<String, Object>> servers = (List<Map<String, Object>>) response.getResult();
+        if (servers == null || servers.isEmpty()) {
+            return "No servers found";
+        }
+        
+        StringBuilder result = new StringBuilder("Cluster servers:\n");
+        for (Map<String, Object> server : servers) {
+            result.append(String.format("- %s:%s (%s) %s\n", 
+                server.get("host"), 
+                server.get("port"), 
+                server.get("type"),
+                (Boolean)server.get("connected") ? "[CONNECTED]" : "[DISCONNECTED]"
+            ));
+        }
+        
+        return result.toString();
     }
 }

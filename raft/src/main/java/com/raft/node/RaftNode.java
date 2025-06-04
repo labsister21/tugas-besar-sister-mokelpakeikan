@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -24,6 +25,10 @@ import com.raft.rpc.HeartbeatMessage;
 import com.raft.rpc.RpcMessage;
 import com.raft.rpc.RpcResponse;
 import com.raft.rpc.VoteMessage;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 
 public class RaftNode {
     private final InetAddress address;
@@ -516,6 +521,9 @@ public class RaftNode {
                         System.out.println("Received vote response from " + channel.getRemoteAddress());
                         VoteMessage.VoteResponse voteResponse = gson.fromJson(message, VoteMessage.VoteResponse.class);
                         handleVoteResponse(voteResponse);
+                    } else if (message.contains("\"type\":\"CLUSTER_CONFIG\"")) {
+                        System.out.println("Received cluster configuration update");
+                        handleClusterConfig(message);
                     } else {
                         System.out.println("MASUK KE PROCESS CLIENT MESSAGEEEEEEEEEEEEEEEEEEEEE !!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                         processClientMessage(channel, message);
@@ -584,10 +592,59 @@ public class RaftNode {
                 value = (String) params.get("value");
                 dataStore.put(key, value);
                 return new RpcResponse(message.getId(), true);
+
+            case "add_server":
+                if (nodeType != NodeType.LEADER) {
+                    return redirectToLeader(message.getId());
+                }
+                String host = (String) params.get("host");
+                int port = ((Number) params.get("port")).intValue();
+                boolean success = addServer(host, port);
+                return new RpcResponse(message.getId(), success);
+                
+            case "remove_server":
+                if (nodeType != NodeType.LEADER) {
+                    return redirectToLeader(message.getId());
+                }
+                host = (String) params.get("host");
+                port = ((Number) params.get("port")).intValue();
+                success = removeServer(host, port);
+                return new RpcResponse(message.getId(), success);
+                
+            case "list_servers":
+                List<Map<String, Object>> serverList = new ArrayList<>();
+                for (ServerInfo info : getClusterMembers()) {
+                    Map<String, Object> serverInfo = new HashMap<>();
+                    serverInfo.put("host", info.getHost());
+                    serverInfo.put("port", info.getPort());
+                    serverInfo.put("type", info.getType().toString());
+                    serverInfo.put("connected", info.isConnected());
+                    serverList.add(serverInfo);
+                }
+                return new RpcResponse(message.getId(), serverList);
                 
             default:
                 return new RpcResponse(message.getId(), 
                     new RpcResponse.RpcError(-32601, "Method not found", null));
+        }
+    }
+
+    private RpcResponse redirectToLeader(String id) {
+        // Find current leader
+        ServerInfo leader = clusterMembers.stream()
+            .filter(s -> s.getType() == NodeType.LEADER)
+            .findFirst()
+            .orElse(null);
+
+        if (leader != null) {
+            return new RpcResponse(id, 
+                new RpcResponse.RpcError(-32000, 
+                    "Not leader. Please connect to leader.", 
+                    Map.of("leader_host", leader.getHost(), 
+                        "leader_port", leader.getPort())));
+        } else {
+            return new RpcResponse(id,
+                new RpcResponse.RpcError(-32001, "Leader not found", null));
         }
     }
 
@@ -630,6 +687,192 @@ public class RaftNode {
             }
         } catch (IOException e) {
             System.err.println("Error closing server: " + e.getMessage());
+        }
+    }
+
+    public boolean addServer(String host, int port) {
+        // Only leaders can change membership
+        if (nodeType != NodeType.LEADER) {
+            return false;
+        }
+        
+        // Check if server already exists in cluster
+        for (ServerInfo member : clusterMembers) {
+            if (member.getHost().equals(host) && member.getPort() == port) {
+                System.out.println("Server " + host + ":" + port + " already exists in cluster");
+                return false;
+            }
+        }   
+        
+        // Add new server to cluster
+        ServerInfo newServer = new ServerInfo(host, port, NodeType.FOLLOWER);
+        clusterMembers.add(newServer);
+        nodeConnections.put(newServer, new NodeConnection(newServer));
+        
+        // Try to connect to the new server
+        try {
+            NodeConnection connection = nodeConnections.get(newServer);
+            connection.connect();
+            
+            // Send the current cluster configuration to the new server
+            sendClusterConfig(connection);
+            
+            System.out.println("Added new server to cluster: " + host + ":" + port);
+            return true;
+        } catch (IOException e) {
+            System.err.println("Error connecting to new server: " + e.getMessage());
+            return false;
+        }
+    }
+
+    public boolean removeServer(String host, int port) {
+        // Only leaders can change membership
+        if (nodeType != NodeType.LEADER) {
+            return false;
+        }
+        
+        // Find server in cluster
+        ServerInfo toRemove = null;
+        for (ServerInfo member : clusterMembers) {
+            if (member.getHost().equals(host) && member.getPort() == port) {
+                toRemove = member;
+                break;
+            }
+        }
+        
+        if (toRemove == null) {
+            System.out.println("Server " + host + ":" + port + " not found in cluster");
+            return false;
+        }
+        
+        // Cannot remove self
+        if (toRemove.getPort() == this.port) {
+            System.out.println("Cannot remove self from cluster");
+            return false;
+        }
+        
+        // Remove server from cluster
+        clusterMembers.remove(toRemove);
+        
+        // Close connection if it exists
+        NodeConnection connection = nodeConnections.remove(toRemove);
+        if (connection != null) {
+            connection.disconnect();
+        }
+        
+        // Notify all remaining servers about the membership change
+        broadcastClusterConfig();
+        
+        System.out.println("Removed server from cluster: " + host + ":" + port);
+        return true;
+    }
+
+    private void sendClusterConfig(NodeConnection connection) { 
+        if (!connection.isConnected()) {
+            return;
+        }
+        
+        try {
+            // Create a list of server addresses in the format "host:port"
+            List<String> serverList = new ArrayList<>();
+            for (ServerInfo server : clusterMembers) {
+                serverList.add(server.getHost() + ":" + server.getPort());
+            }
+            
+            // Create and send config message
+            String configMessage = String.format(
+                "{\"type\":\"CLUSTER_CONFIG\",\"term\":%d,\"servers\":%s}",
+                currentTerm,
+                gson.toJson(serverList)
+            );
+            
+            connection.send(configMessage);
+        } catch (IOException e) {
+            System.err.println("Error sending cluster config: " + e.getMessage());
+            connection.disconnect();
+        }
+    }
+
+    private void broadcastClusterConfig() {
+        for (Map.Entry<ServerInfo, NodeConnection> entry : nodeConnections.entrySet()) {
+            NodeConnection connection = entry.getValue();
+            if (connection.isConnected()) {
+                sendClusterConfig(connection);
+            }
+        }
+    }
+
+    public List<ServerInfo> getClusterMembers() {
+        return new ArrayList<>(clusterMembers);
+    }
+
+    private void handleClusterConfig(String message) {
+        try {
+            JsonObject config = gson.fromJson(message, JsonObject.class);
+            JsonArray servers = config.getAsJsonArray("servers");
+            
+            // Only accept configs from current leader or with higher term
+            long configTerm = config.get("term").getAsLong();
+            if (configTerm < currentTerm) {
+                return;
+            }
+            
+            // Update term if necessary
+            if (configTerm > currentTerm) {
+                currentTerm = configTerm;
+                votedFor = null;
+            }
+            
+            // Clear existing members and add new ones
+            List<ServerInfo> newMembers = new ArrayList<>();
+            
+            // Keep our own entry
+            for (ServerInfo self : clusterMembers) {
+                if (self.getPort() == this.port) {
+                    newMembers.add(self);
+                    break;
+                }
+            }
+            
+            // Add all servers from config
+            for (JsonElement serverElem : servers) {
+                String serverAddr = serverElem.getAsString();
+                String[] parts = serverAddr.split(":");
+                if (parts.length == 2) {
+                    String host = parts[0];
+                    int port = Integer.parseInt(parts[1]);
+                    
+                    // Skip our own entry
+                    if (port == this.port) continue;
+                    
+                    ServerInfo info = new ServerInfo(host, port, NodeType.FOLLOWER);
+                    newMembers.add(info);
+                    
+                    // If this is a new server, create a connection
+                    boolean found = false;
+                    for (ServerInfo existing : clusterMembers) {
+                        if (existing.getPort() == port && existing.getHost().equals(host)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!found) {
+                        nodeConnections.put(info, new NodeConnection(info));
+                    }
+                }
+            }
+            
+            // Update cluster members
+            clusterMembers.clear();
+            clusterMembers.addAll(newMembers);
+            
+            System.out.println("Updated cluster configuration. New members:");
+            for (ServerInfo member : clusterMembers) {
+                System.out.println("- " + member);
+            }
+        } catch (Exception e) {
+            System.err.println("Error processing cluster config: " + e.getMessage());
         }
     }
 }

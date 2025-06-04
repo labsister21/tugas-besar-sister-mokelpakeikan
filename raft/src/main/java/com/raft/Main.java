@@ -91,6 +91,49 @@ public class Main {
                         response = "Tidak ada koneksi aktif.";
                     }
                     break;
+                case "add_server":
+                    if (raftClient != null) {
+                        if (parts.length == 3) {
+                            String host = parts[1];
+                            try {
+                                int port = Integer.parseInt(parts[2]);
+                                response = raftClient.addServer(host, port);
+                            } catch (NumberFormatException e) {
+                                response = "Port harus berupa angka";
+                            }
+                        } else {
+                            response = "Penggunaan: add_server <host> <port>";
+                        }
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
+                    break;
+                    
+                case "remove_server":
+                    if (raftClient != null) {
+                        if (parts.length == 3) {
+                            String host = parts[1];
+                            try {
+                                int port = Integer.parseInt(parts[2]);
+                                response = raftClient.removeServer(host, port);
+                            } catch (NumberFormatException e) {
+                                response = "Port harus berupa angka";
+                            }
+                        } else {
+                            response = "Penggunaan: remove_server <host> <port>";
+                        }
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
+                    break;
+                    
+                case "list_servers":
+                    if (raftClient != null) {
+                        response = raftClient.listServers();
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
+                    break;
                 default:
                     response = "Perintah tidak dikenal: " + command;
             }
