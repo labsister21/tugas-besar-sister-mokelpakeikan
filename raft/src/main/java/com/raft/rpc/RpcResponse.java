@@ -48,6 +48,14 @@ public class RpcResponse {
         return new Gson().fromJson(json, RpcResponse.class);
     }
 
+    public static RpcResponse error(int code, String message) {
+        return new RpcResponse(null, new RpcError(code, message, null));
+    }
+
+    public static RpcResponse success(String result) {
+        return new RpcResponse(null, result);
+    }
+
     public static class RpcError {
         @SerializedName("code")
         private int code;

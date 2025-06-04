@@ -16,7 +16,9 @@ import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.function.Consumer;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 import com.google.gson.Gson;
@@ -48,10 +50,21 @@ public class RaftNode {
     private long lastLogIndex;
     private long lastLogTerm;
     private boolean inElection;
+    private final ServerInfo self;
+    private final List<LogEntry> log = new ArrayList<>();
+
+
 
     // Constants
     private static final long HEARTBEAT_INTERVAL = 5000; // 2 seconds
     private static final Random random = new Random();
+
+    private int commitIndex = -1;
+    private int lastApplied = -1;
+
+    private final Map<ServerInfo, Integer> matchIndex = new ConcurrentHashMap<>();
+    private final Map<ServerInfo, Integer> nextIndex = new ConcurrentHashMap<>();
+
 
     public RaftNode(String hostAddress, int port, NodeType nodeType) throws IOException {
         this.address = InetAddress.getByName(hostAddress);
@@ -74,6 +87,8 @@ public class RaftNode {
         this.receivedVotes = 0;
         this.lastLogIndex = 0;
         this.lastLogTerm = 0;
+        this.self = new ServerInfo(address.getHostName(), port, nodeType);
+
         
         initializeClusterMembers();
         for (ServerInfo member : clusterMembers) {
@@ -85,6 +100,12 @@ public class RaftNode {
 
         if (nodeType == NodeType.LEADER) {
             System.out.println("Node ini adalah leader");
+            for (ServerInfo follower : clusterMembers) {
+                if (!follower.equals(self)) {
+                    nextIndex.put(follower, log.size());     // start after last log index
+                    matchIndex.put(follower, -1);            // belum ada yang cocok
+                }
+            }
             startHeartbeat();
         } else {
             System.out.printf("Node ini adalah follower dengan timeout %.2f ms%n", heartbeatTimeout);
@@ -516,6 +537,11 @@ public class RaftNode {
                         System.out.println("Received vote response from " + channel.getRemoteAddress());
                         VoteMessage.VoteResponse voteResponse = gson.fromJson(message, VoteMessage.VoteResponse.class);
                         handleVoteResponse(voteResponse);
+                    } else if( message.contains("\"type\":\"APPEND_ENTRIES\"")) {
+                        System.out.println("MASUK KE APPEND ENTRIESEEEEEEEEEEEEEEEEEEEE !!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                        Map<String, Object> params = gson.fromJson(message, Map.class);
+                        RpcResponse ack = handleAppendEntries(params);
+                        sendResponse(channel, ack);
                     } else {
                         System.out.println("MASUK KE PROCESS CLIENT MESSAGEEEEEEEEEEEEEEEEEEEEE !!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                         processClientMessage(channel, message);
@@ -553,9 +579,45 @@ public class RaftNode {
                         response = new RpcResponse(rpcMessage.getId(),
                             new RpcResponse.RpcError(-32001, "Leader not found", null));
                     }
+                } else if (rpcMessage.getMethod().equals("appendEntries")) {
+                    Map<String, Object> params = (Map<String, Object>) rpcMessage.getParams();
+                    RpcResponse ack = handleAppendEntries(params);
+                    sendResponse(clientChannel, ack);  // ← kirim ACK ke Leader
+                    return; 
                 } else {
                     // Process the command if this is the leader
-                    response = processCommand(rpcMessage);
+                    synchronized (log) {
+                        System.out.println("\n=== Starting Log Replication ===");
+                        System.out.println("Command: " + rpcMessage.getMethod());
+                        System.out.println("Current term: " + currentTerm);
+                        
+                        LogEntry entry = new LogEntry(currentTerm, rpcMessage);
+                        int entryIndex = log.size();
+                        log.add(entry);
+                        System.out.println("Entry added to log at index: " + entryIndex);
+                        
+                        // Start replication to followers
+                        System.out.println("Starting replication to followers...");
+                        replicateLogToFollowers(entry, entryIndex);
+                        
+                        // Wait for the entry to be committed
+                        System.out.println("Waiting for entry to be committed...");
+                        while (commitIndex < entryIndex) {
+                            try {
+                                Thread.sleep(100); // Wait a bit before checking again
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                        }
+                        System.out.println("Entry committed at index: " + entryIndex);
+                        
+                        // Process the command and get response
+                        System.out.println("Processing command...");
+                        response = processCommand(rpcMessage);
+                        System.out.println("Command processed. Response: " + response.getResult());
+                        System.out.println("=== Log Replication Complete ===\n");
+                    }  
                 }
 
                 // Send response
@@ -565,6 +627,153 @@ public class RaftNode {
             }
         });
     }
+
+    private void commitEntry(int index) {
+        if (index > commitIndex) {
+            LogEntry entry = log.get(index);
+            RpcMessage cmd = RpcMessage.fromJson(entry.getCommand());  // Convert String to RpcMessage
+
+            // Apply command ke state machine
+            processCommand(cmd); 
+
+            commitIndex = index;
+        }
+    }
+
+    private void replicateLogToFollowers(LogEntry entry, int entryIndex) {
+        System.out.println("\n--- Replicating to Followers ---");
+        for (ServerInfo follower : clusterMembers) {
+            if (!follower.equals(self)) {
+                System.out.println("Replicating to follower: " + follower);
+                replicateLogEntry(follower, entryIndex);
+            }
+        }
+    }
+
+    private void replicateLogEntry(ServerInfo follower, int entryIndex) {
+        if (entryIndex >= log.size()) {
+            return;
+        }
+        LogEntry entry = log.get(entryIndex);
+        Map<String, Object> payload = new ConcurrentHashMap<>();
+        payload.put("term", currentTerm);
+        payload.put("leaderId", self.toString());
+        payload.put("prevLogIndex", entryIndex - 1);
+        payload.put("prevLogTerm", entryIndex > 0 ? log.get(entryIndex - 1).getTerm() : 0L);
+        payload.put("entries", entry);
+        payload.put("leaderCommit", commitIndex);
+
+        System.out.println("Sending AppendEntries to " + follower + " for index " + entryIndex);
+        sendRpcAsync(follower, "appendEntries", payload, response -> {
+            if (response.getError() == null) {
+                System.out.println("Follower " + follower + " acknowledged entry at index " + entryIndex);
+                matchIndex.put(follower, entryIndex);
+                nextIndex.put(follower, entryIndex + 1);
+                tryCommitEntries();
+            } else {
+                System.out.println("Follower " + follower + " rejected entry at index " + entryIndex + 
+                                 ". Error: " + response.getError());
+                nextIndex.put(follower, Math.max(0, nextIndex.get(follower) - 1));
+                replicateLogEntry(follower, nextIndex.get(follower));
+            }
+        });
+    }
+
+    private void sendRpcAsync(ServerInfo follower, String method, Map<String, Object> payload, Consumer<RpcResponse> callback) {
+        executorService.submit(() -> {
+            try {
+                NodeConnection conn = nodeConnections.get(follower);
+                if (conn == null || !conn.isConnected()) return;
+
+                RpcMessage message = new RpcMessage(UUID.randomUUID().toString(), method, payload);
+                conn.send(message.toJson());
+
+                // Simulate reading response
+                SocketChannel channel = conn.getChannel();
+                ByteBuffer buffer = ByteBuffer.allocate(1024);
+                int read = channel.read(buffer);
+                if (read > 0) {
+                    buffer.flip();
+                    String responseStr = new String(buffer.array(), 0, buffer.limit()).trim();
+                    RpcResponse response = RpcResponse.fromJson(responseStr);
+                    callback.accept(response);
+                } else {
+                    callback.accept(RpcResponse.error(-99, "no response"));
+                }
+            } catch (Exception e) {
+                callback.accept(RpcResponse.error(-99, "send failed: " + e.getMessage()));
+            }
+        });
+    }
+
+    private void tryCommitEntries() {
+        for (int i = log.size() - 1; i > commitIndex; i--) {
+            int finalI = i;
+            long count = matchIndex.values().stream()
+                .filter(index -> index >= finalI)
+                .count() + 1; // +1 untuk leader sendiri
+
+            if (count >= (clusterMembers.size() / 2) + 1 && log.get(i).getTerm() == currentTerm) {
+                System.out.println("\n--- Committing Entries ---");
+                System.out.println("Committing entries up to index: " + i);
+                System.out.println("Number of followers that have replicated: " + (count - 1));
+                commitIndex = i;
+                applyCommittedEntries();
+                break;
+            }
+        }
+    }
+
+    private void applyCommittedEntries() {
+        while (lastApplied < commitIndex) {
+            lastApplied++;
+            System.out.println("Applying committed entry at index: " + lastApplied);
+            RpcMessage cmd = RpcMessage.fromJson(log.get(lastApplied).getCommand());
+            processCommand(cmd);
+        }
+    }
+
+
+    private RpcResponse handleAppendEntries(Map<String, Object> params) {
+        System.out.println("1");
+        long term = ((Number) params.get("term")).longValue();
+        int prevLogIndex = ((Number) params.get("prevLogIndex")).intValue();
+        long prevLogTerm = ((Number) params.get("prevLogTerm")).longValue();
+        @SuppressWarnings("unchecked")
+        List<LogEntry> entries = (List<LogEntry>) params.get("entries");
+        int leaderCommit = ((Number) params.get("leaderCommit")).intValue();
+        System.out.println("2");
+
+        if (term < currentTerm) {
+            
+            return RpcResponse.error(-1, "Term too old");
+        }
+
+        if (prevLogIndex >= 0) {
+            if (log.size() <= prevLogIndex || log.get(prevLogIndex).getTerm() != prevLogTerm) {
+                return RpcResponse.error(-2, "Log inconsistency");
+            }
+        }
+
+        // Replace or append log entries
+        for (int i = 0; i < entries.size(); i++) {
+            int index = prevLogIndex + 1 + i;
+            if (log.size() > index) {
+                log.set(index, entries.get(i));
+            } else {
+                log.add(entries.get(i));
+            }
+        }
+
+        if (leaderCommit > commitIndex) {
+            commitIndex = Math.min(leaderCommit, log.size() - 1);
+            System.out.println("Commit index updated to " + commitIndex);
+            applyCommittedEntries();
+        }
+
+        return RpcResponse.success("ACK");
+    }
+
 
     private RpcResponse processCommand(RpcMessage message) {
         String method = message.getMethod();
