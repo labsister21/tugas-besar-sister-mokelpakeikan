@@ -8,7 +8,7 @@ services:
       - raft-network
     ports:
       - "8001:8001"
-    command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node1", "8001", "LEADER"]
+    command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node1", "8001", "FOLLOWER"]
 
   raft-node2:
     build: .
