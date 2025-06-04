@@ -83,6 +83,14 @@ public class Main {
                         response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
                     }
                     break;
+                case "strln":
+                    if (raftClient != null) {
+                        if (parts.length > 1) response = raftClient.strln(parts[1]);
+                        else response = "Penggunaan: strln <key>";
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
+                    break;
                 case "disconnect":
                     if (raftClient != null) {
                         raftClient.disconnect();

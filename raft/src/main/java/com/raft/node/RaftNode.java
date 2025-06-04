@@ -580,7 +580,35 @@ public class RaftNode {
                 value = (String) params.get("value");
                 dataStore.put(key, value);
                 return new RpcResponse(message.getId(), true);
-                
+            
+            case "append":
+                key = (String) params.get("key");
+                String appendValue = (String) params.get("value");
+
+                boolean isNew = !dataStore.containsKey(key);
+                dataStore.put(key, dataStore.getOrDefault(key, "") + appendValue);
+
+                if (isNew) {
+                    return new RpcResponse(message.getId(), "OK");
+                } else {
+                    return new RpcResponse(message.getId(), dataStore.get(key));
+                }
+
+            case "del":
+                key = (String) params.get("key");
+                String removedValue = dataStore.remove(key);
+                return new RpcResponse(message.getId(), removedValue != null ? removedValue : "");
+
+            case "strln":
+                key = (String) params.get("key");
+                String strValue = dataStore.get(key);
+                if (strValue != null) {
+                    return new RpcResponse(message.getId(), strValue.length());
+                } else {
+                    return new RpcResponse(message.getId(), 
+                        new RpcResponse.RpcError(-32005, "Key not found", null));
+                }
+                 
             default:
                 return new RpcResponse(message.getId(), 
                     new RpcResponse.RpcError(-32601, "Method not found", null));

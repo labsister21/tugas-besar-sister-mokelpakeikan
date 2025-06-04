@@ -114,7 +114,7 @@ public class App {
         if (response.getError() != null) {
             return "Error: " + response.getError().getMessage();
         }
-        return "OK";
+        return response.getResult().toString();
     }
 
     public String del(String key) {
@@ -122,7 +122,15 @@ public class App {
         if (response.getError() != null) {
             return "Error: " + response.getError().getMessage();
         }
-        return "OK";
+        return response.getResult().toString();
+    }
+
+    public String strln(String key) {
+        RpcResponse response = sendRequest("strln", Map.of("key", key));
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        return response.getResult().toString();
     }
 
     public void disconnect() {
