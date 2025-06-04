@@ -93,25 +93,27 @@ public class RaftNode {
     }
 
     private void initializeClusterMembers() {
-        // clusterMembers.add(new ServerInfo("raft-node1", 8001, NodeType.FOLLOWER));
-        // clusterMembers.add(new ServerInfo("raft-node2", 8002, NodeType.FOLLOWER));
-        // clusterMembers.add(new ServerInfo("raft-node3", 8003, NodeType.FOLLOWER));
-        // clusterMembers.add(new ServerInfo("raft-node4", 8004, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node1", 8001, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node2", 8002, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node3", 8003, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node4", 8004, NodeType.FOLLOWER));
 
-        clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("localhost", 8002, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("localhost", 8003, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("localhost", 8002, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("localhost", 8003, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
     }
 
     private void startTimeoutChecker() {
         heartbeatExecutor.scheduleAtFixedRate(() -> {
+            if (nodeType == NodeType.LEADER) {
+                return;  // Leader tidak perlu mengecek timeout
+            }
+            
             long now = System.currentTimeMillis();
             if (now - lastHeartbeatReceived > heartbeatTimeout && !inElection) {
                 System.out.println("No heartbeat received for " + (now - lastHeartbeatReceived) + " ms. Starting election!");
-                if(!inElection){
-                    startElection();
-                }
+                startElection();
             }
         }, 1000, 1000, MILLISECONDS);
     }
@@ -159,6 +161,7 @@ public class RaftNode {
                 System.out.println("--------------------------------");
             }
             lastHeartbeatReceived = System.currentTimeMillis();
+            inElection = false;  // Reset election state when heartbeat received
             
             // Update term if necessary
             if (heartbeat.getTerm() > currentTerm) {
@@ -171,6 +174,9 @@ public class RaftNode {
 
     private void startElection() {
         synchronized (voteLock) {
+            if (inElection) {
+                return;  // Prevent multiple elections at the same time
+            }
             inElection = true;
             nodeType = NodeType.CANDIDATE;
             currentTerm++;
@@ -222,11 +228,12 @@ public class RaftNode {
 
         // Set timer untuk election
         heartbeatExecutor.schedule(() -> {
-            if (nodeType == NodeType.CANDIDATE) {
-                System.out.println("Election timeout - reverting to follower");
-                synchronized (voteLock) {
+            synchronized (voteLock) {
+                if (nodeType == NodeType.CANDIDATE) {
+                    System.out.println("Election timeout - reverting to follower");
                     nodeType = NodeType.FOLLOWER;
-                    inElection = false;
+                    inElection = false;  // Reset election state
+                    votedFor = null;  // Reset vote
                 }
             }
         }, 10000, MILLISECONDS);
@@ -279,17 +286,14 @@ public class RaftNode {
             else { // request.getTerm() == currentTerm
                 if ((votedFor == null || votedFor.equals(request.getCandidateId())) &&
                    (request.getLastLogIndex() >= lastLogIndex && request.getLastLogTerm() >= lastLogTerm)) {
-                    
                     votedFor = request.getCandidateId();
                     voteGranted = true;
                 } else {
                     voteGranted = false;
                 }
             }
-                            
         }
         System.out.println("voted for : " + votedFor);
-
 
         VoteMessage.VoteResponse response = new VoteMessage.VoteResponse(
             currentTerm,
@@ -300,7 +304,6 @@ public class RaftNode {
         long now = System.currentTimeMillis();
         System.out.println("--------------------------------");
         System.out.println("created vote response for " + request.getCandidateId() + " response : " + voteGranted + " at " + now/1000 + " s with response type : " + response.getType());
-
 
         try {
             String jsonResponse = gson.toJson(response);
@@ -360,6 +363,7 @@ public class RaftNode {
         if (nodeType == NodeType.CANDIDATE) {
             System.out.println("Becoming leader for term " + currentTerm);
             nodeType = NodeType.LEADER;
+            inElection = false;  // Reset election state
 
             // Update the corresponding ServerInfo in clusterMembers
             for (ServerInfo member : clusterMembers) {
