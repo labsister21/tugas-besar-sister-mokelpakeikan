@@ -37,6 +37,15 @@ services:
       - "8004:8004"
     command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node4", "8004", "FOLLOWER"]
 
+  raft-node5:
+    build: .
+    container_name: raft-node5
+    networks:
+      - raft-network
+    ports:
+      - "8005:8005"
+    command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node5", "8005", "STANDBY"]
+
   raft-client:
     build: .
     container_name: raft-client
