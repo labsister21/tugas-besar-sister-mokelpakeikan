@@ -4,21 +4,29 @@ import com.google.gson.annotations.SerializedName;
 
 public class AppendEntriesResponse {
     @SerializedName("type")
-    public final String type = "APPEND_ENTRIES_RESPONSE";
+    private final String type = "APPEND_ENTRIES_RESPONSE";
     
     @SerializedName("term")
-    public final long term;
+    private final long term;
     
     @SerializedName("success")
-    public final boolean success;
+    private final boolean success;
     
     @SerializedName("followerId")
-    public final String followerId;
+    private final String followerId;
 
-    public AppendEntriesResponse(long term, boolean success, String followerId) {
+    @SerializedName("commandId")
+    private final String commandId;
+    
+    @SerializedName("lastLogIndex")
+    private final long lastLogIndex;
+
+    public AppendEntriesResponse(long term, boolean success, String followerId, String commandId, long lastLogIndex) {
         this.term = term;
         this.success = success;
         this.followerId = followerId;
+        this.commandId = commandId;
+        this.lastLogIndex = lastLogIndex;
     }
 
     public String getType() {
@@ -35,5 +43,13 @@ public class AppendEntriesResponse {
 
     public String getFollowerId() {
         return followerId;
+    }
+
+    public String getCommandId() {
+        return commandId;
+    }
+
+    public long getLastLogIndex() {
+        return lastLogIndex;
     }
 }

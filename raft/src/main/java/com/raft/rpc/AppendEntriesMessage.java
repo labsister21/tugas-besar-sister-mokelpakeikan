@@ -21,12 +21,16 @@ public class AppendEntriesMessage {
     @SerializedName("prevLogTerm")
     public final long prevLogTerm;
 
+    @SerializedName("commandId")
+    public final String commandId;
+
     public AppendEntriesMessage(String leaderId, long term, RpcMessage command, long prevLogIndex, long prevLogTerm) {
         this.leaderId = leaderId;
         this.term = term;
         this.command = command;
         this.prevLogIndex = prevLogIndex;
         this.prevLogTerm = prevLogTerm;
+        this.commandId = command != null ? command.getId() : null;
     }
 
     public String getType() {
@@ -51,5 +55,9 @@ public class AppendEntriesMessage {
 
     public long getPrevLogTerm() {
         return prevLogTerm;
+    }
+
+    public String getCommandId() {
+        return commandId;
     }
 }

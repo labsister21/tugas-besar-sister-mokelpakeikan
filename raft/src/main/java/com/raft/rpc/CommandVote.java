@@ -1,5 +1,6 @@
 package com.raft.rpc;
 
+import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -67,5 +68,9 @@ public class CommandVote {
 
     public void setCommitted(boolean committed) {
         this.committed = committed;
+    }
+
+    public void addVote(String voterId) {
+        votes.add(voterId);
     }
 }

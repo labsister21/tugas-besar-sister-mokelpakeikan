@@ -14,7 +14,8 @@ public class NodeConnection {
     private final AtomicBoolean isConnected;
     private long lastHeartbeat;
     private final Gson gson;
-    private int nextIndex; // Track the next log entry to send to this follower
+    private long nextIndex; // Changed from int to long
+    private long matchIndex;  // Changed from int to long
 
     public NodeConnection(ServerInfo serverInfo) {
         this.serverInfo = serverInfo;
@@ -22,6 +23,7 @@ public class NodeConnection {
         this.lastHeartbeat = 0;
         this.gson = new Gson();
         this.nextIndex = 1; // Initialize to 1 (first log entry)
+        this.matchIndex = 0; // Initialize matchIndex to 0
     }
 
     public void connect() throws IOException {
@@ -121,11 +123,19 @@ public class NodeConnection {
         isConnected.set(connected);
     }
 
-    public int getNextIndex() {
+    public long getNextIndex() {
         return nextIndex;
     }
 
-    public void setNextIndex(int nextIndex) {
+    public void setNextIndex(long nextIndex) {
         this.nextIndex = nextIndex;
+    }
+
+    public long getMatchIndex() {
+        return matchIndex;
+    }
+
+    public void setMatchIndex(long matchIndex) {
+        this.matchIndex = matchIndex;
     }
 } 

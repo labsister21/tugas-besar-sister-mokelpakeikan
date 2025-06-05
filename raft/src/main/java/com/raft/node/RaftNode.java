@@ -536,7 +536,7 @@ public class RaftNode {
                     } else if (message.contains("\"type\":\"APPEND_ENTRIES_RESPONSE\"")) {
                         System.out.println("Received AppendEntries response from " + channel.getRemoteAddress());
                         AppendEntriesResponse response = gson.fromJson(message, AppendEntriesResponse.class);
-                        handleAppendEntriesResponse(channel, response);
+                        handleAppendEntriesResponse(response);
                     } else if (message.contains("\"type\":\"LOG_REPLICATION\"")) {
                         Map<String, Object> replicationMsg = gson.fromJson(message, Map.class);
                         String commandId = (String) replicationMsg.get("commandId");
@@ -868,17 +868,21 @@ public class RaftNode {
 
     private void sendAppendEntries(NodeConnection connection, RpcMessage command) {
         try {
+            // For empty logs or first entry, prevLogIndex should be 0
+            long prevLogIndex = lastLogIndex > 0 ? lastLogIndex - 1 : 0;
+            long prevLogTerm = prevLogIndex > 0 ? logEntries.get((int)prevLogIndex - 1).getTerm() : 0;
+
             AppendEntriesMessage appendEntries = new AppendEntriesMessage(
                 address.getHostAddress() + ":" + port,
                 currentTerm,
                 command,
-                lastLogIndex,  // Send current log index
-                lastLogTerm
+                prevLogIndex,
+                prevLogTerm
             );
             String jsonMessage = gson.toJson(appendEntries);
             System.out.println("Sending AppendEntries to " + connection.getServerInfo() + 
                 " for command ID: " + command.getId() + 
-                " with log index: " + lastLogIndex);
+                " with prevLogIndex: " + prevLogIndex);
             connection.send(jsonMessage);
         } catch (IOException e) {
             System.err.println("Error sending AppendEntries: " + e.getMessage());
@@ -892,6 +896,8 @@ public class RaftNode {
             // 1. Reply false if term < currentTerm (§5.1)
             if (message.getTerm() < currentTerm) {
                 success = false;
+                System.out.println("Rejecting AppendEntries: message term " + message.getTerm() + 
+                    " is less than current term " + currentTerm);
             } else {
                 // Update term if message term is higher
                 if (message.getTerm() > currentTerm) {
@@ -905,20 +911,30 @@ public class RaftNode {
                 // whose term matches prevLogTerm (§5.3)
                 if (message.getPrevLogIndex() > lastLogIndex) {
                     success = false;
+                    System.out.println("Rejecting AppendEntries: prevLogIndex " + message.getPrevLogIndex() + 
+                        " is greater than lastLogIndex " + lastLogIndex);
                 } else if (message.getPrevLogIndex() > 0) {
                     // Check if we have the entry at prevLogIndex and if its term matches
                     if (message.getPrevLogIndex() <= logEntries.size()) {
+                        if (message.getPrevLogIndex()<logEntries.size()){
+                            System.out.println("Mismatch log index");
+                        }
                         LogEntry prevEntry = logEntries.get((int)message.getPrevLogIndex() - 1);
                         if (prevEntry.getTerm() != message.getPrevLogTerm()) {
                             success = false;
+                            System.out.println("Rejecting AppendEntries: term mismatch at index " + 
+                                message.getPrevLogIndex() + " (expected " + message.getPrevLogTerm() + 
+                                ", got " + prevEntry.getTerm() + ")");
                         } else {
                             success = true;
                         }
                     } else {
                         success = false;
+                        System.out.println("Rejecting AppendEntries: no entry at index " + message.getPrevLogIndex());
                     }
                 } else {
                     // Special case: prevLogIndex = 0 means we're starting from the beginning
+                    // or this is the first entry in an empty log
                     success = true;
                 }
                 
@@ -931,23 +947,29 @@ public class RaftNode {
                         logEntries.subList((int)message.getPrevLogIndex(), logEntries.size()).clear();
                     }
                     
+                    // Calculate the new log index
+                    long newLogIndex = message.getPrevLogIndex() + 1;
+                    
                     // Add new entry
-                    logEntries.add(new LogEntry(
+                    LogEntry newEntry = new LogEntry(
                         message.getCommand().getMethod(),
                         message.getCommand().getId(),
-                        message.getPrevLogIndex() + 1,
+                        newLogIndex,
                         currentTerm,
                         (Map<String, Object>) message.getCommand().getParams()
-                    ));
+                    );
+                    logEntries.add(newEntry);
                     
                     // Update our log index
-                    lastLogIndex = message.getPrevLogIndex() + 1;
+                    lastLogIndex = newLogIndex;
                     
                     // Execute the command
                     RpcResponse rpcResponse = executeCommand(message.getCommand());
                     
                     // Save state after adding new log entry
                     PersistentState.saveState(currentTerm, votedFor, logEntries);
+                    
+                    System.out.println("Added new log entry: " + newEntry + " at index " + lastLogIndex);
                 }
             }
 
@@ -955,7 +977,9 @@ public class RaftNode {
             AppendEntriesResponse response = new AppendEntriesResponse(
                 currentTerm,
                 success,
-                address.getHostAddress() + ":" + port
+                address.getHostAddress() + ":" + port,
+                message.getCommandId(),
+                lastLogIndex
             );
 
             try {
@@ -963,79 +987,56 @@ public class RaftNode {
                 ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
                 channel.write(buffer);
                 System.out.println("Sent AppendEntries response: " + jsonResponse + 
-                    " for command ID: " + (message.getCommand() != null ? message.getCommand().getId() : "null"));
+                    " for command ID: " + message.getCommandId() + 
+                    " (success: " + success + ", prevLogIndex: " + message.getPrevLogIndex() + 
+                    ", lastLogIndex: " + lastLogIndex + ")");
             } catch (IOException e) {
                 System.err.println("Error sending AppendEntries response: " + e.getMessage());
             }
         }
     }
 
-    private void handleAppendEntriesResponse(SocketChannel channel, AppendEntriesResponse response) {
-        System.out.println("Processing AppendEntries response from " + response.getFollowerId());
-        
-        if (response.getTerm() > currentTerm) {
-            currentTerm = response.getTerm();
-            votedFor = null;
-            PersistentState.saveState(currentTerm, votedFor, logEntries);
-            revertToFollower();
+    private void handleAppendEntriesResponse(AppendEntriesResponse response) {
+        if (nodeType != NodeType.LEADER) {
             return;
         }
 
-        if (response.isSuccess()) {
-            // Find the command vote by follower ID
-            for (Map.Entry<String, CommandVote> entry : commandVotes.entrySet()) {
-                CommandVote vote = entry.getValue();
-                if (!vote.executed) {
-                    vote.votes.add(response.getFollowerId());
-                    System.out.println("Added vote from " + response.getFollowerId() + " for command ID: " + entry.getKey());
-                    System.out.println("Current votes for command " + entry.getKey() + ": " + vote.votes.size());
-                    break;
-                }
+        // Find the command vote for this response
+        CommandVote commandVote = null;
+        for (CommandVote vote : commandVotes.values()) {
+            if (vote.getCommand().getId().equals(response.getCommandId())) {
+                commandVote = vote;
+                break;
             }
-        } else {
-            // Log repair: decrement nextIndex for this follower
-            ServerInfo followerInfo = null;
-            for (ServerInfo info : clusterMembers) {
-                if ((info.getHost() + ":" + info.getPort()).equals(response.getFollowerId())) {
-                    followerInfo = info;
-                    break;
-                }
+        }
+
+        if (commandVote == null) {
+            System.err.println("No command vote found for command ID: " + response.getCommandId());
+            return;
+        }
+
+        // Add vote from follower
+        commandVote.addVote(response.getFollowerId());
+        System.out.println("Added vote from " + response.getFollowerId() + " for command " + response.getCommandId());
+        System.out.println("Current votes for command " + response.getCommandId() + ": " + commandVote.getVotes().size());
+
+        // Update match index for the follower
+        for (NodeConnection conn : nodeConnections.values()) {
+            if ((conn.getServerInfo().getHost() + ":" + conn.getServerInfo().getPort()).equals(response.getFollowerId())) {
+                conn.setMatchIndex(response.getLastLogIndex());
+                conn.setNextIndex(response.getLastLogIndex() + 1);
+                break;
             }
-            
-            if (followerInfo != null) {
-                NodeConnection connection = nodeConnections.get(followerInfo);
-                if (connection != null) {
-                    // Decrement nextIndex for this follower
-                    int nextIndex = connection.getNextIndex();
-                    if (nextIndex > 1) {
-                        connection.setNextIndex(nextIndex - 1);
-                        System.out.println("Decremented nextIndex for " + response.getFollowerId() + 
-                            " to " + connection.getNextIndex());
-                        
-                        // Resend AppendEntries with the new nextIndex
-                        try {
-                            // Get the previous log entry
-                            LogEntry prevEntry = logEntries.get(connection.getNextIndex() - 1);
-                            
-                            // Create new AppendEntries message
-                            AppendEntriesMessage appendEntries = new AppendEntriesMessage(
-                                address.getHostAddress() + ":" + port,
-                                currentTerm,
-                                null, // No new command, just log repair
-                                connection.getNextIndex() - 1,
-                                prevEntry.getTerm()
-                            );
-                            
-                            String jsonMessage = gson.toJson(appendEntries);
-                            connection.send(jsonMessage);
-                            System.out.println("Resent AppendEntries to " + response.getFollowerId() + 
-                                " with prevLogIndex=" + (connection.getNextIndex() - 1));
-                        } catch (IOException e) {
-                            System.err.println("Error resending AppendEntries: " + e.getMessage());
-                        }
-                    }
-                }
-            }
+        }
+
+        // Check if we have enough votes to commit
+        int activeNodes = nodeConnections.size() + 1; // +1 for leader
+        int currentVotes = commandVote.getVotes().size() + 1; // +1 for leader's vote
+        System.out.println("Active nodes: " + activeNodes + ", Current votes for command " + response.getCommandId() + ": " + currentVotes);
+
+        if (currentVotes > activeNodes / 2) {
+            commandVote.setCommitted(true);
+            System.out.println("Command " + response.getCommandId() + " committed with " + currentVotes + " votes");
         }
     }
 
