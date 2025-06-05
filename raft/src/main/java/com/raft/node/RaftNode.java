@@ -26,85 +26,63 @@ import com.raft.rpc.HeartbeatMessage;
 import com.raft.rpc.RpcMessage;
 import com.raft.rpc.RpcResponse;
 import com.raft.rpc.VoteMessage;
-import com.raft.node.LogEntry;
+// import com.raft.node.LogEntry;
 
 public class RaftNode {
+    // Persistent State
+    private long currentTerm = 0;
+    private String votedFor = null;
+    private final List<LogEntry> logEntries = new ArrayList<>();
+
+    // Volatile State
+    private int commitIndex = 0;
+    private int lastApplied = 0;
+
+    // Volatile State (Leader)
+    private List<Integer> nextIndex = null;
+    private List<Integer> matchIndex = null;
+
+
+    // Connections
     private final InetAddress address;
     private final int port;
-    private NodeType nodeType;
-    private final List<ServerInfo> clusterMembers;
-    private final Map<String, String> dataStore;
-    private final Map<SocketChannel, ByteBuffer> clientBuffers;
-    private final ExecutorService executorService;
-    private final Map<ServerInfo, NodeConnection> nodeConnections;
-    private final ScheduledExecutorService heartbeatExecutor;
     private ServerSocketChannel serverSocket;
-    private Selector selector;
-    private volatile boolean running;
-    private long currentTerm;
-    private final Gson gson;
+    private final Map<SocketChannel, ByteBuffer> clientBuffers;
+    private final Map<ServerInfo, NodeConnection> nodeConnections;
+
+
+    // Timeouts / Intervals
+    private final int VOTE_TIMEOUT = 5000; // 5 seconds timeout for votes
     private final float heartbeatTimeout;
+    private static final long HEARTBEAT_INTERVAL = 5000; // 2 seconds
+
+
+    // Service
+    private final ExecutorService executorService;
+    private final ScheduledExecutorService heartbeatExecutor;
+
+    // Cluster Information
+    private final List<ServerInfo> clusterMembers;
+
+
+    // Server Information
+    private NodeType nodeType;
+    private final Map<String, String> dataStore;
+    private volatile boolean running;
     private long lastHeartbeatReceived;
-    private String votedFor;
     private int receivedVotes;
-    private final Object voteLock = new Object();
     private long lastLogIndex;
     private long lastLogTerm;
     private boolean inElection;
-    private final Map<String, CommandVote> commandVotes = new ConcurrentHashMap<>();
-    private final int VOTE_TIMEOUT = 5000; // 5 seconds timeout for votes
 
     // Constants
-    private static final long HEARTBEAT_INTERVAL = 5000; // 2 seconds
     private static final Random random = new Random();
+    private final Gson gson;
+    private final Object voteLock = new Object();
+    private final Map<String, CommandVote> commandVotes = new ConcurrentHashMap<>();
+    private Selector selector;
 
-    private static class CommandVote {
-        final RpcMessage command;
-        final Set<String> votes = ConcurrentHashMap.newKeySet();
-        final Set<String> replicatedNodes = ConcurrentHashMap.newKeySet();
-        final long timestamp;
-        final long logIndex;
-        volatile boolean executed = false;
-        volatile boolean committed = false;
 
-        CommandVote(RpcMessage command, long logIndex) {
-            this.command = command;
-            this.timestamp = System.currentTimeMillis();
-            this.logIndex = logIndex;
-        }
-    }
-
-    private static class AppendEntriesMessage {
-        final String type = "APPEND_ENTRIES";
-        final String leaderId;
-        final long term;
-        final RpcMessage command;
-        final long prevLogIndex;
-        final long prevLogTerm;
-
-        AppendEntriesMessage(String leaderId, long term, RpcMessage command, long prevLogIndex, long prevLogTerm) {
-            this.leaderId = leaderId;
-            this.term = term;
-            this.command = command;
-            this.prevLogIndex = prevLogIndex;
-            this.prevLogTerm = prevLogTerm;
-        }
-    }
-
-    private static class AppendEntriesResponse {
-        final String type = "APPEND_ENTRIES_RESPONSE";
-        final long term;
-        final boolean success;
-        final String followerId;
-
-        AppendEntriesResponse(long term, boolean success, String followerId) {
-            this.term = term;
-            this.success = success;
-            this.followerId = followerId;
-        }
-    }
-
-    private final List<LogEntry> logEntries = new ArrayList<>();
 
     public RaftNode(String hostAddress, int port, NodeType nodeType) throws IOException {
         this.address = InetAddress.getByName(hostAddress);
@@ -146,15 +124,15 @@ public class RaftNode {
     }
 
     private void initializeClusterMembers() {
-        clusterMembers.add(new ServerInfo("raft-node1", 8001, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("raft-node2", 8002, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("raft-node3", 8003, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("raft-node4", 8004, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("raft-node1", 8001, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("raft-node2", 8002, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("raft-node3", 8003, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("raft-node4", 8004, NodeType.FOLLOWER));
 
-        // clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.FOLLOWER));
-        // clusterMembers.add(new ServerInfo("localhost", 8002, NodeType.FOLLOWER));
-        // clusterMembers.add(new ServerInfo("localhost", 8003, NodeType.FOLLOWER));
-        // clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("localhost", 8002, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("localhost", 8003, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
     }
 
     private void startTimeoutChecker() {
@@ -907,86 +885,6 @@ public class RaftNode {
         }
     }
 
-    private void handleMessage(SocketChannel channel, String message) {
-        try {
-            // Try to parse as RPC message first
-            if (message.contains("\"type\":\"APPEND_ENTRIES\"")) {
-                AppendEntriesMessage appendEntries = gson.fromJson(message, AppendEntriesMessage.class);
-                handleAppendEntries(channel, appendEntries);
-                return;
-            } else if (message.contains("\"type\":\"APPEND_ENTRIES_RESPONSE\"")) {
-                AppendEntriesResponse response = gson.fromJson(message, AppendEntriesResponse.class);
-                handleAppendEntriesResponse(channel, response);
-                return;
-            } else if (message.contains("\"type\":\"LOG_REPLICATION\"")) {
-                Map<String, Object> replicationMsg = gson.fromJson(message, Map.class);
-                String commandId = (String) replicationMsg.get("commandId");
-                String followerId = (String) replicationMsg.get("followerId");
-                boolean success = (boolean) replicationMsg.get("success");
-                
-                if (success) {
-                    CommandVote vote = commandVotes.get(commandId);
-                    if (vote != null) {
-                        vote.replicatedNodes.add(followerId);
-                        System.out.println("Received log replication confirmation from " + followerId + 
-                            " for command " + commandId + 
-                            " (total replicated: " + vote.replicatedNodes.size() + ")");
-                    }
-                }
-                return;
-            }
-
-            RpcMessage rpcMessage = RpcMessage.fromJson(message);
-            System.out.println("Received message: " + message);
-            
-            // Handle other RPC messages
-            switch (rpcMessage.getMethod().toLowerCase()) {
-                case "ping":
-                    sendResponse(channel, new RpcResponse(rpcMessage.getId(), "pong"));
-                    break;
-                    
-                case "get":
-                case "set":
-                case "del":
-                case "append":
-                case "strln":
-                    if (nodeType == NodeType.LEADER) {
-                        RpcResponse response = processCommand(rpcMessage);
-                        sendResponse(channel, response);
-                    } else {
-                        // If not leader, forward to leader
-                        ServerInfo leader = clusterMembers.stream()
-                            .filter(s -> s.getType() == NodeType.LEADER)
-                            .findFirst()
-                            .orElse(null);
-
-                        if (leader != null) {
-                            NodeConnection leaderConn = nodeConnections.get(leader);
-                            if (leaderConn != null) {
-                                try {
-                                    leaderConn.send(gson.toJson(rpcMessage));
-                                } catch (IOException e) {
-                                    System.err.println("Error forwarding command to leader: " + e.getMessage());
-                                }
-                            }
-                        }
-                    }
-                    break;
-
-                case "getlog":
-                    // Handle getlog directly without leader check
-                    RpcResponse response = executeCommand(rpcMessage);
-                    sendResponse(channel, response);
-                    break;
-                    
-                default:
-                    sendResponse(channel, new RpcResponse(rpcMessage.getId(),
-                        new RpcResponse.RpcError(-32601, "Method not found", null)));
-            }
-        } catch (Exception e) {
-            System.err.println("Error handling message: " + e.getMessage());
-        }
-    }
 
     private void sendAppendEntries(NodeConnection connection, RpcMessage command) {
         try {
