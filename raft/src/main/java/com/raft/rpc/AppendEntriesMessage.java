@@ -4,22 +4,22 @@ import com.google.gson.annotations.SerializedName;
 
 public class AppendEntriesMessage {
     @SerializedName("type")
-    private final String type = "APPEND_ENTRIES";
+    public final String type = "APPEND_ENTRIES";
     
     @SerializedName("leaderId")
-    private final String leaderId;
+    public final String leaderId;
     
     @SerializedName("term")
-    private final long term;
+    public final long term;
     
     @SerializedName("command")
-    private final RpcMessage command;
+    public final RpcMessage command;
     
     @SerializedName("prevLogIndex")
-    private final long prevLogIndex;
+    public final long prevLogIndex;
     
     @SerializedName("prevLogTerm")
-    private final long prevLogTerm;
+    public final long prevLogTerm;
 
     public AppendEntriesMessage(String leaderId, long term, RpcMessage command, long prevLogIndex, long prevLogTerm) {
         this.leaderId = leaderId;

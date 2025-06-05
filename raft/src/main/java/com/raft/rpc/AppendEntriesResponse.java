@@ -4,16 +4,16 @@ import com.google.gson.annotations.SerializedName;
 
 public class AppendEntriesResponse {
     @SerializedName("type")
-    private final String type = "APPEND_ENTRIES_RESPONSE";
+    public final String type = "APPEND_ENTRIES_RESPONSE";
     
     @SerializedName("term")
-    private final long term;
+    public final long term;
     
     @SerializedName("success")
-    private final boolean success;
+    public final boolean success;
     
     @SerializedName("followerId")
-    private final String followerId;
+    public final String followerId;
 
     public AppendEntriesResponse(long term, boolean success, String followerId) {
         this.term = term;

@@ -26,6 +26,9 @@ import com.raft.rpc.HeartbeatMessage;
 import com.raft.rpc.RpcMessage;
 import com.raft.rpc.RpcResponse;
 import com.raft.rpc.VoteMessage;
+import com.raft.rpc.AppendEntriesMessage;
+import com.raft.rpc.AppendEntriesResponse;
+import com.raft.rpc.CommandVote;
 // import com.raft.node.LogEntry;
 
 public class RaftNode {
@@ -119,15 +122,15 @@ public class RaftNode {
     }
 
     private void initializeClusterMembers() {
-        // clusterMembers.add(new ServerInfo("raft-node1", 8001, NodeType.FOLLOWER));
-        // clusterMembers.add(new ServerInfo("raft-node2", 8002, NodeType.FOLLOWER));
-        // clusterMembers.add(new ServerInfo("raft-node3", 8003, NodeType.FOLLOWER));
-        // clusterMembers.add(new ServerInfo("raft-node4", 8004, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node1", 8001, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node2", 8002, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node3", 8003, NodeType.FOLLOWER));
+        clusterMembers.add(new ServerInfo("raft-node4", 8004, NodeType.FOLLOWER));
 
-        clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("localhost", 8002, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("localhost", 8003, NodeType.FOLLOWER));
-        clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("localhost", 8001, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("localhost", 8002, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("localhost", 8003, NodeType.FOLLOWER));
+        // clusterMembers.add(new ServerInfo("localhost", 8004, NodeType.FOLLOWER));
     }
 
     private void startTimeoutChecker() {
@@ -185,11 +188,13 @@ public class RaftNode {
                                  " (term: " + heartbeat.getTerm() + " heartbeat got on " + (now-this.lastHeartbeatReceived) + " , timestamp : "+now+")");
             }
             lastHeartbeatReceived = System.currentTimeMillis();
-            inElection = false;  // Reset election state when heartbeat received
             
             // Update term if necessary
             if (heartbeat.getTerm() > currentTerm) {
                 currentTerm = heartbeat.getTerm();
+                if (nodeType == NodeType.CANDIDATE) {
+                    cancelCandidation();
+                }
             }
         } catch (Exception e) {
             System.err.println("Error processing heartbeat: " + e.getMessage());
@@ -244,15 +249,21 @@ public class RaftNode {
 
         // Set timer untuk election
         heartbeatExecutor.schedule(() -> {
-            synchronized (voteLock) {
-                if (nodeType == NodeType.CANDIDATE) {
-                    System.out.println("Election timeout - reverting to follower");
-                    nodeType = NodeType.FOLLOWER;
-                    inElection = false;  // Reset election state
-                    votedFor = null;  // Reset vote
-                }
+            if (nodeType == NodeType.CANDIDATE) {
+                System.out.println("Election timeout - reverting to follower");
+                cancelCandidation();
             }
         }, 10000, MILLISECONDS);
+    }
+
+    private void cancelCandidation() {
+        synchronized (voteLock) {
+            if (inElection) {
+                inElection = false;
+                nodeType = NodeType.FOLLOWER;
+                votedFor = null;
+            }
+        }
     }
 
     private void sendVoteRequest(NodeConnection connection, VoteMessage.VoteRequest request) {
@@ -265,7 +276,6 @@ public class RaftNode {
             channel.configureBlocking(false);
             SelectionKey key = channel.keyFor(selector);
             
-            // Fix: Ensure proper registration and buffer allocation
             clientBuffers.putIfAbsent(channel, ByteBuffer.allocate(1024));
             if (key == null || !key.isValid()) {
                 key = channel.register(selector, SelectionKey.OP_READ);
@@ -274,7 +284,7 @@ public class RaftNode {
                 key.interestOps(SelectionKey.OP_READ);
                 System.out.println("Updated existing channel for reading vote responses");
             }
-            selector.wakeup(); // Wake up selector to process new registrations
+            selector.wakeup();
         } catch (Exception e) {
             System.err.println("Error sending vote request: " + e.getMessage());
             e.printStackTrace();
@@ -346,8 +356,7 @@ public class RaftNode {
 
         if (response.getTerm() > currentTerm) {
             currentTerm = response.getTerm();
-            nodeType = NodeType.FOLLOWER;
-            votedFor = null;
+            cancelCandidation();
             return;
         }
 
@@ -390,6 +399,11 @@ public class RaftNode {
             votedFor = null;
             startHeartbeat();
         }
+    }
+
+    private void revertToFollower() {
+        nodeType = NodeType.FOLLOWER;
+        votedFor = null;
     }
 
     public void startServer() throws IOException {
@@ -481,7 +495,6 @@ public class RaftNode {
     private void read(SelectionKey key) {
         SocketChannel channel = (SocketChannel) key.channel();
         ByteBuffer buffer = clientBuffers.get(channel);
-        System.out.println(" !!!!!! MASUK READDDDDDD !!!!");
 
         if (buffer == null) {
             System.err.println("No buffer found for channel: " + channel);
@@ -506,7 +519,6 @@ public class RaftNode {
 
                 String message = new String(data).trim();
                 System.out.println("message recieved from " + channel.getRemoteAddress() + " : " + message);
-                
                 // Parse message to determine type
                 try {
                     if (message.contains("\"type\":\"HEARTBEAT\"")) {

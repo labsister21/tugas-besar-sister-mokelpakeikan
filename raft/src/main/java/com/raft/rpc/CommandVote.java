@@ -7,25 +7,25 @@ import com.google.gson.annotations.SerializedName;
 
 public class CommandVote {
     @SerializedName("command")
-    private final RpcMessage command;
+    public final RpcMessage command;
     
     @SerializedName("votes")
-    private final Set<String> votes = ConcurrentHashMap.newKeySet();
+    public final Set<String> votes = ConcurrentHashMap.newKeySet();
     
     @SerializedName("replicatedNodes")
-    private final Set<String> replicatedNodes = ConcurrentHashMap.newKeySet();
+    public final Set<String> replicatedNodes = ConcurrentHashMap.newKeySet();
     
     @SerializedName("timestamp")
-    private final long timestamp;
+    public final long timestamp;
     
     @SerializedName("logIndex")
-    private final long logIndex;
+    public final long logIndex;
     
     @SerializedName("executed")
-    private volatile boolean executed = false;
+    public volatile boolean executed = false;
     
     @SerializedName("committed")
-    private volatile boolean committed = false;
+    public volatile boolean committed = false;
 
     public CommandVote(RpcMessage command, long logIndex) {
         this.command = command;
