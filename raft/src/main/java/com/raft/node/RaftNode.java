@@ -26,6 +26,7 @@ import com.raft.rpc.HeartbeatMessage;
 import com.raft.rpc.RpcMessage;
 import com.raft.rpc.RpcResponse;
 import com.raft.rpc.VoteMessage;
+import com.raft.node.LogEntry;
 
 public class RaftNode {
     private final InetAddress address;
@@ -100,28 +101,6 @@ public class RaftNode {
             this.term = term;
             this.success = success;
             this.followerId = followerId;
-        }
-    }
-
-    private static class LogEntry {
-        final String method;
-        final String commandId;
-        final long logIndex;
-        final long term;
-        final Map<String, Object> params;
-
-        LogEntry(String method, String commandId, long logIndex, long term, Map<String, Object> params) {
-            this.method = method;
-            this.commandId = commandId;
-            this.logIndex = logIndex;
-            this.term = term;
-            this.params = params;
-        }
-
-        @Override
-        public String toString() {
-            return String.format("[Index: %d, Term: %d] %s (ID: %s) %s", 
-                logIndex, term, method, commandId, params);
         }
     }
 
@@ -842,11 +821,11 @@ public class RaftNode {
                 List<Map<String, Object>> logList = new ArrayList<>();
                 for (LogEntry entry : logEntries) {
                     Map<String, Object> logMap = new HashMap<>();
-                    logMap.put("index", entry.logIndex);
-                    logMap.put("term", entry.term);
-                    logMap.put("method", entry.method);
-                    logMap.put("commandId", entry.commandId);
-                    logMap.put("params", entry.params);
+                    logMap.put("index", entry.getLogIndex());
+                    logMap.put("term", entry.getTerm());
+                    logMap.put("method", entry.getMethod());
+                    logMap.put("commandId", entry.getCommandId());
+                    logMap.put("params", entry.getParams());
                     logList.add(logMap);
                 }
                 return new RpcResponse(message.getId(), logList);
