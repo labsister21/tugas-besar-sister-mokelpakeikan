@@ -14,12 +14,14 @@ public class NodeConnection {
     private final AtomicBoolean isConnected;
     private long lastHeartbeat;
     private final Gson gson;
+    private int nextIndex; // Track the next log entry to send to this follower
 
     public NodeConnection(ServerInfo serverInfo) {
         this.serverInfo = serverInfo;
         this.isConnected = new AtomicBoolean(false);
         this.lastHeartbeat = 0;
         this.gson = new Gson();
+        this.nextIndex = 1; // Initialize to 1 (first log entry)
     }
 
     public void connect() throws IOException {
@@ -117,5 +119,13 @@ public class NodeConnection {
 
     public void setConnected(boolean connected) {
         isConnected.set(connected);
+    }
+
+    public int getNextIndex() {
+        return nextIndex;
+    }
+
+    public void setNextIndex(int nextIndex) {
+        this.nextIndex = nextIndex;
     }
 } 

@@ -887,18 +887,68 @@ public class RaftNode {
 
     private void handleAppendEntries(SocketChannel channel, AppendEntriesMessage message) {
         synchronized (voteLock) {
-            if (message.getTerm() > currentTerm) {
-                currentTerm = message.getTerm();
-                votedFor = null;
-                PersistentState.saveState(currentTerm, votedFor, logEntries);
-                revertToFollower();
-            }
-
-            // Check if we can accept the entries
-            boolean success = true;
-            if (message.prevLogIndex > lastLogIndex) {
-                System.out.println("Log index mismatch: leader=" + message.prevLogIndex + ", follower=" + lastLogIndex);
+            boolean success = false;
+            
+            // 1. Reply false if term < currentTerm (§5.1)
+            if (message.getTerm() < currentTerm) {
                 success = false;
+            } else {
+                // Update term if message term is higher
+                if (message.getTerm() > currentTerm) {
+                    currentTerm = message.getTerm();
+                    votedFor = null;
+                    PersistentState.saveState(currentTerm, votedFor, logEntries);
+                    revertToFollower();
+                }
+                
+                // 2. Reply false if log doesn't contain an entry at prevLogIndex
+                // whose term matches prevLogTerm (§5.3)
+                if (message.getPrevLogIndex() > lastLogIndex) {
+                    success = false;
+                } else if (message.getPrevLogIndex() > 0) {
+                    // Check if we have the entry at prevLogIndex and if its term matches
+                    if (message.getPrevLogIndex() <= logEntries.size()) {
+                        LogEntry prevEntry = logEntries.get((int)message.getPrevLogIndex() - 1);
+                        if (prevEntry.getTerm() != message.getPrevLogTerm()) {
+                            success = false;
+                        } else {
+                            success = true;
+                        }
+                    } else {
+                        success = false;
+                    }
+                } else {
+                    // Special case: prevLogIndex = 0 means we're starting from the beginning
+                    success = true;
+                }
+                
+                // 3. If an existing entry conflicts with a new one (same index
+                // but different terms), delete the existing entry and all that
+                // follow it (§5.3)
+                if (success && message.getCommand() != null) {
+                    // Truncate log if needed
+                    if (message.getPrevLogIndex() < logEntries.size()) {
+                        logEntries.subList((int)message.getPrevLogIndex(), logEntries.size()).clear();
+                    }
+                    
+                    // Add new entry
+                    logEntries.add(new LogEntry(
+                        message.getCommand().getMethod(),
+                        message.getCommand().getId(),
+                        message.getPrevLogIndex() + 1,
+                        currentTerm,
+                        (Map<String, Object>) message.getCommand().getParams()
+                    ));
+                    
+                    // Update our log index
+                    lastLogIndex = message.getPrevLogIndex() + 1;
+                    
+                    // Execute the command
+                    RpcResponse rpcResponse = executeCommand(message.getCommand());
+                    
+                    // Save state after adding new log entry
+                    PersistentState.saveState(currentTerm, votedFor, logEntries);
+                }
             }
 
             // Send response
@@ -913,47 +963,7 @@ public class RaftNode {
                 ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
                 channel.write(buffer);
                 System.out.println("Sent AppendEntries response: " + jsonResponse + 
-                    " for command ID: " + message.command.getId() + 
-                    " (success: " + success + ")");
-
-                // If successful, process the command and replicate the log
-                if (success && message.command != null) {
-                    System.out.println("Processing command from AppendEntries with ID: " + message.command.getId());
-                    RpcResponse rpcResponse = executeCommand(message.command);
-                    
-                    // Add log entry
-                    logEntries.add(new LogEntry(
-                        message.command.getMethod(),
-                        message.command.getId(),
-                        message.prevLogIndex + 1,
-                        currentTerm,
-                        (Map<String, Object>) message.command.getParams()
-                    ));
-                    
-                    // Update our log index
-                    lastLogIndex = message.prevLogIndex + 1;
-                    System.out.println("Updated log index to: " + lastLogIndex);
-                    
-                    // Send replication confirmation to leader
-                    Map<String, Object> replicationMsg = new HashMap<>();
-                    replicationMsg.put("type", "LOG_REPLICATION");
-                    replicationMsg.put("commandId", message.command.getId());
-                    replicationMsg.put("followerId", address.getHostAddress() + ":" + port);
-                    replicationMsg.put("success", true);
-                    replicationMsg.put("logIndex", lastLogIndex);
-                    
-                    String replicationJson = gson.toJson(replicationMsg);
-                    buffer = ByteBuffer.wrap((replicationJson + "\n").getBytes());
-                    channel.write(buffer);
-                    System.out.println("Sent log replication confirmation for command " + message.command.getId() + 
-                        " with logIndex: " + lastLogIndex);
-                    
-                    // Send the response back to the leader
-                    sendResponse(channel, rpcResponse);
-
-                    // Save state after adding new log entry
-                    PersistentState.saveState(currentTerm, votedFor, logEntries);
-                }
+                    " for command ID: " + (message.getCommand() != null ? message.getCommand().getId() : "null"));
             } catch (IOException e) {
                 System.err.println("Error sending AppendEntries response: " + e.getMessage());
             }
@@ -961,28 +971,71 @@ public class RaftNode {
     }
 
     private void handleAppendEntriesResponse(SocketChannel channel, AppendEntriesResponse response) {
-        System.out.println("Processing AppendEntries response from " + response.followerId);
+        System.out.println("Processing AppendEntries response from " + response.getFollowerId());
         
-        if (response.term > currentTerm) {
-            currentTerm = response.term;
+        if (response.getTerm() > currentTerm) {
+            currentTerm = response.getTerm();
             votedFor = null;
             PersistentState.saveState(currentTerm, votedFor, logEntries);
+            revertToFollower();
             return;
         }
 
-        if (response.success) {
+        if (response.isSuccess()) {
             // Find the command vote by follower ID
             for (Map.Entry<String, CommandVote> entry : commandVotes.entrySet()) {
                 CommandVote vote = entry.getValue();
                 if (!vote.executed) {
-                    vote.votes.add(response.followerId);
-                    System.out.println("Added vote from " + response.followerId + " for command ID: " + entry.getKey());
+                    vote.votes.add(response.getFollowerId());
+                    System.out.println("Added vote from " + response.getFollowerId() + " for command ID: " + entry.getKey());
                     System.out.println("Current votes for command " + entry.getKey() + ": " + vote.votes.size());
                     break;
                 }
             }
         } else {
-            System.out.println("Received unsuccessful AppendEntries response from " + response.followerId);
+            // Log repair: decrement nextIndex for this follower
+            ServerInfo followerInfo = null;
+            for (ServerInfo info : clusterMembers) {
+                if ((info.getHost() + ":" + info.getPort()).equals(response.getFollowerId())) {
+                    followerInfo = info;
+                    break;
+                }
+            }
+            
+            if (followerInfo != null) {
+                NodeConnection connection = nodeConnections.get(followerInfo);
+                if (connection != null) {
+                    // Decrement nextIndex for this follower
+                    int nextIndex = connection.getNextIndex();
+                    if (nextIndex > 1) {
+                        connection.setNextIndex(nextIndex - 1);
+                        System.out.println("Decremented nextIndex for " + response.getFollowerId() + 
+                            " to " + connection.getNextIndex());
+                        
+                        // Resend AppendEntries with the new nextIndex
+                        try {
+                            // Get the previous log entry
+                            LogEntry prevEntry = logEntries.get(connection.getNextIndex() - 1);
+                            
+                            // Create new AppendEntries message
+                            AppendEntriesMessage appendEntries = new AppendEntriesMessage(
+                                address.getHostAddress() + ":" + port,
+                                currentTerm,
+                                null, // No new command, just log repair
+                                connection.getNextIndex() - 1,
+                                prevEntry.getTerm()
+                            );
+                            
+                            String jsonMessage = gson.toJson(appendEntries);
+                            connection.send(jsonMessage);
+                            System.out.println("Resent AppendEntries to " + response.getFollowerId() + 
+                                " with prevLogIndex=" + (connection.getNextIndex() - 1));
+                        } catch (IOException e) {
+                            System.err.println("Error resending AppendEntries: " + e.getMessage());
+                        }
+                    }
+                }
+            }
         }
     }
 
