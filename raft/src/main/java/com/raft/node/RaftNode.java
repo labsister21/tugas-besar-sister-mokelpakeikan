@@ -103,6 +103,30 @@ public class RaftNode {
         }
     }
 
+    private static class LogEntry {
+        final String method;
+        final String commandId;
+        final long logIndex;
+        final long term;
+        final Map<String, Object> params;
+
+        LogEntry(String method, String commandId, long logIndex, long term, Map<String, Object> params) {
+            this.method = method;
+            this.commandId = commandId;
+            this.logIndex = logIndex;
+            this.term = term;
+            this.params = params;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("[Index: %d, Term: %d] %s (ID: %s) %s", 
+                logIndex, term, method, commandId, params);
+        }
+    }
+
+    private final List<LogEntry> logEntries = new ArrayList<>();
+
     public RaftNode(String hostAddress, int port, NodeType nodeType) throws IOException {
         this.address = InetAddress.getByName(hostAddress);
         this.port = port;
@@ -611,7 +635,10 @@ public class RaftNode {
                 RpcMessage rpcMessage = RpcMessage.fromJson(message);
                 RpcResponse response;
                 
-                if (nodeType != NodeType.LEADER) {
+                // Handle getLog command directly without leader check
+                if (rpcMessage.getMethod().toLowerCase().equals("getlog")) {
+                    response = executeCommand(rpcMessage);
+                } else if (nodeType != NodeType.LEADER) {
                     // If not leader, return error with leader information
                     ServerInfo leader = clusterMembers.stream()
                         .filter(s -> s.getType() == NodeType.LEADER)
@@ -647,7 +674,7 @@ public class RaftNode {
                 new RpcResponse.RpcError(-32000, "Not leader", null));
         }
 
-        String method = message.getMethod();
+        String method = message.getMethod().toLowerCase(); // Convert to lowercase for case-insensitive comparison
         
         // Handle read-only commands directly
         if (method.equals("ping") || method.equals("get") || method.equals("strln")) {
@@ -700,6 +727,15 @@ public class RaftNode {
                         
                         // Execute command and wait for replication
                         RpcResponse response = executeCommand(message);
+                        
+                        // Add log entry
+                        logEntries.add(new LogEntry(
+                            message.getMethod(),
+                            message.getId(),
+                            lastLogIndex + 1,
+                            currentTerm,
+                            (Map<String, Object>) message.getParams()
+                        ));
                         
                         // Increment log index after successful execution
                         lastLogIndex++;
@@ -756,7 +792,7 @@ public class RaftNode {
     }
 
     private RpcResponse executeCommand(RpcMessage message) {
-        String method = message.getMethod();
+        String method = message.getMethod().toLowerCase(); // Convert to lowercase for case-insensitive comparison
         Map<String, Object> params = (Map<String, Object>) message.getParams();
 
         switch (method) {
@@ -801,11 +837,36 @@ public class RaftNode {
                     return new RpcResponse(message.getId(), 
                         new RpcResponse.RpcError(-32005, "Key not found", null));
                 }
+
+            case "getlog":  
+                List<Map<String, Object>> logList = new ArrayList<>();
+                for (LogEntry entry : logEntries) {
+                    Map<String, Object> logMap = new HashMap<>();
+                    logMap.put("index", entry.logIndex);
+                    logMap.put("term", entry.term);
+                    logMap.put("method", entry.method);
+                    logMap.put("commandId", entry.commandId);
+                    logMap.put("params", entry.params);
+                    logList.add(logMap);
+                }
+                return new RpcResponse(message.getId(), logList);
                  
             default:
                 return new RpcResponse(message.getId(), 
                     new RpcResponse.RpcError(-32601, "Method not found", null));
         }
+    }
+
+    private void printLogEntries() {
+        System.out.println("\n=== Log Entries ===");
+        if (logEntries.isEmpty()) {
+            System.out.println("No log entries yet");
+        } else {
+            for (LogEntry entry : logEntries) {
+                System.out.println(entry);
+            }
+        }
+        System.out.println("=================\n");
     }
 
     private void handleCommandVote(SocketChannel channel, RpcMessage message) {
@@ -900,7 +961,7 @@ public class RaftNode {
             System.out.println("Received message: " + message);
             
             // Handle other RPC messages
-            switch (rpcMessage.getMethod()) {
+            switch (rpcMessage.getMethod().toLowerCase()) {
                 case "ping":
                     sendResponse(channel, new RpcResponse(rpcMessage.getId(), "pong"));
                     break;
@@ -931,6 +992,12 @@ public class RaftNode {
                             }
                         }
                     }
+                    break;
+
+                case "getlog":
+                    // Handle getlog directly without leader check
+                    RpcResponse response = executeCommand(rpcMessage);
+                    sendResponse(channel, response);
                     break;
                     
                 default:
@@ -1000,6 +1067,15 @@ public class RaftNode {
                 System.out.println("Processing command from AppendEntries with ID: " + message.command.getId());
                 RpcResponse rpcResponse = executeCommand(message.command);
                 
+                // Add log entry
+                logEntries.add(new LogEntry(
+                    message.command.getMethod(),
+                    message.command.getId(),
+                    message.prevLogIndex + 1,
+                    currentTerm,
+                    (Map<String, Object>) message.command.getParams()
+                ));
+                
                 // Update our log index
                 lastLogIndex = message.prevLogIndex + 1;
                 System.out.println("Updated log index to: " + lastLogIndex);
@@ -1049,6 +1125,24 @@ public class RaftNode {
             }
         } else {
             System.out.println("Received unsuccessful AppendEntries response from " + response.followerId);
+        }
+    }
+
+    public static void main(String[] args) {
+        if (args.length < 3) {
+            System.out.println("Usage: java RaftNode <host> <port> <nodeType>");
+            return;
+        }
+
+        String host = args[0];
+        int port = Integer.parseInt(args[1]);
+        NodeType nodeType = NodeType.valueOf(args[2].toUpperCase());
+
+        try {
+            RaftNode node = new RaftNode(host, port, nodeType);
+            node.startServer();
+        } catch (IOException e) {
+            System.err.println("Error starting server: " + e.getMessage());
         }
     }
 }

@@ -91,6 +91,13 @@ public class Main {
                         response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
                     }
                     break;
+                case "getlog":
+                    if (raftClient != null) {
+                        response = raftClient.getLog();
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
+                    break;
                 case "disconnect":
                     if (raftClient != null) {
                         raftClient.disconnect();
