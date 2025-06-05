@@ -5,6 +5,7 @@ com\raft\rpc\AppendEntriesMessage.class
 com\raft\rpc\AppendEntriesResponse.class
 com\raft\rpc\RpcResponse.class
 com\raft\rpc\VoteMessage$VoteResponse.class
+com\raft\storage\PersistentState.class
 com\raft\node\LogEntry.class
 com\raft\node\NodeConnection.class
 com\raft\rpc\HeartbeatMessage.class
@@ -17,3 +18,4 @@ com\raft\rpc\CommandVote.class
 com\raft\node\NodeType.class
 com\raft\rpc\RpcMessage.class
 com\raft\Main.class
+com\raft\storage\PersistentState$State.class

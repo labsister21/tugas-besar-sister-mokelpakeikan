@@ -29,6 +29,8 @@ import com.raft.rpc.VoteMessage;
 import com.raft.rpc.AppendEntriesMessage;
 import com.raft.rpc.AppendEntriesResponse;
 import com.raft.rpc.CommandVote;
+import com.raft.storage.PersistentState;
+import com.raft.storage.PersistentState.State;
 // import com.raft.node.LogEntry;
 
 public class RaftNode {
@@ -97,17 +99,21 @@ public class RaftNode {
         this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor();
         this.clusterMembers = new ArrayList<>();
         this.nodeConnections = new ConcurrentHashMap<>();
-        this.currentTerm = 0;
         this.gson = new Gson();
+        
+        // Load persistent state
+        State state = PersistentState.loadState();
+        this.currentTerm = state.getCurrentTerm();
+        this.votedFor = state.getVotedFor();
+        this.logEntries.addAll(state.getLog());
         
         // Initialize random heartbeat timeout between 5000-7000 milliseconds
         this.heartbeatTimeout = 5000 + random.nextFloat() * 2000;
         this.lastHeartbeatReceived = System.currentTimeMillis();
         
-        this.votedFor = null;
         this.receivedVotes = 0;
-        this.lastLogIndex = 0;  // Initialize log index to 0
-        this.lastLogTerm = 0;
+        this.lastLogIndex = logEntries.size();  // Initialize log index based on loaded log
+        this.lastLogTerm = logEntries.isEmpty() ? 0 : logEntries.get(logEntries.size() - 1).getTerm();
         
         initializeClusterMembers();
         for (ServerInfo member : clusterMembers) {
@@ -118,7 +124,6 @@ public class RaftNode {
         }
 
         startTimeoutChecker();
-
     }
 
     private void initializeClusterMembers() {
@@ -192,6 +197,8 @@ public class RaftNode {
             // Update term if necessary
             if (heartbeat.getTerm() > currentTerm) {
                 currentTerm = heartbeat.getTerm();
+                votedFor = null;
+                PersistentState.saveState(currentTerm, votedFor, logEntries);
                 if (nodeType == NodeType.CANDIDATE) {
                     cancelCandidation();
                 }
@@ -210,6 +217,7 @@ public class RaftNode {
             nodeType = NodeType.CANDIDATE;
             currentTerm++;
             votedFor = address.getHostAddress() + ":" + port;
+            PersistentState.saveState(currentTerm, votedFor, logEntries);
             receivedVotes = 1; // Vote for self
             System.out.println("Starting election for term " + currentTerm);
         }
@@ -292,31 +300,20 @@ public class RaftNode {
     }
 
     private void handleVoteRequest(SocketChannel channel, VoteMessage.VoteRequest request) {
-        System.out.println("Handling vote request");
         boolean voteGranted = false;
         synchronized (voteLock) {
-            if (request.getTerm() < currentTerm) {
-                voteGranted = false;
-            } 
-            else if (request.getTerm() > currentTerm) {
+            if (request.getTerm() > currentTerm) {
                 currentTerm = request.getTerm();
-                nodeType = NodeType.FOLLOWER;
                 votedFor = null;
-                if (request.getLastLogIndex() >= lastLogIndex && request.getLastLogTerm() >= lastLogTerm) {
-                    votedFor = request.getCandidateId();
-                    voteGranted = true;
-                } else {
-                    voteGranted = false;
-                }
-            } 
-            else { // request.getTerm() == currentTerm
-                if ((votedFor == null || votedFor.equals(request.getCandidateId())) &&
-                   (request.getLastLogIndex() >= lastLogIndex && request.getLastLogTerm() >= lastLogTerm)) {
-                    votedFor = request.getCandidateId();
-                    voteGranted = true;
-                } else {
-                    voteGranted = false;
-                }
+                PersistentState.saveState(currentTerm, votedFor, logEntries);
+                revertToFollower();
+            }
+
+            if (request.getTerm() == currentTerm && 
+                (votedFor == null || votedFor.equals(request.getCandidateId()))) {
+                votedFor = request.getCandidateId();
+                PersistentState.saveState(currentTerm, votedFor, logEntries);
+                voteGranted = true;
             }
         }
         System.out.println("voted for : " + votedFor);
@@ -889,76 +886,77 @@ public class RaftNode {
     }
 
     private void handleAppendEntries(SocketChannel channel, AppendEntriesMessage message) {
-        System.out.println("Processing AppendEntries from " + message.leaderId + 
-            " for command ID: " + message.command.getId() + 
-            " with prevLogIndex: " + message.prevLogIndex);
-        
-        // Update term if necessary
-        if (message.term > currentTerm) {
-            currentTerm = message.term;
-            nodeType = NodeType.FOLLOWER;
-            votedFor = null;
-        }
-
-        // Check if we can accept the entries
-        boolean success = true;
-        if (message.prevLogIndex > lastLogIndex) {
-            System.out.println("Log index mismatch: leader=" + message.prevLogIndex + ", follower=" + lastLogIndex);
-            success = false;
-        }
-
-        // Send response
-        AppendEntriesResponse response = new AppendEntriesResponse(
-            currentTerm,
-            success,
-            address.getHostAddress() + ":" + port
-        );
-
-        try {
-            String jsonResponse = gson.toJson(response);
-            ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
-            channel.write(buffer);
-            System.out.println("Sent AppendEntries response: " + jsonResponse + 
-                " for command ID: " + message.command.getId() + 
-                " (success: " + success + ")");
-
-            // If successful, process the command and replicate the log
-            if (success && message.command != null) {
-                System.out.println("Processing command from AppendEntries with ID: " + message.command.getId());
-                RpcResponse rpcResponse = executeCommand(message.command);
-                
-                // Add log entry
-                logEntries.add(new LogEntry(
-                    message.command.getMethod(),
-                    message.command.getId(),
-                    message.prevLogIndex + 1,
-                    currentTerm,
-                    (Map<String, Object>) message.command.getParams()
-                ));
-                
-                // Update our log index
-                lastLogIndex = message.prevLogIndex + 1;
-                System.out.println("Updated log index to: " + lastLogIndex);
-                
-                // Send replication confirmation to leader
-                Map<String, Object> replicationMsg = new HashMap<>();
-                replicationMsg.put("type", "LOG_REPLICATION");
-                replicationMsg.put("commandId", message.command.getId());
-                replicationMsg.put("followerId", address.getHostAddress() + ":" + port);
-                replicationMsg.put("success", true);
-                replicationMsg.put("logIndex", lastLogIndex);
-                
-                String replicationJson = gson.toJson(replicationMsg);
-                buffer = ByteBuffer.wrap((replicationJson + "\n").getBytes());
-                channel.write(buffer);
-                System.out.println("Sent log replication confirmation for command " + message.command.getId() + 
-                    " with logIndex: " + lastLogIndex);
-                
-                // Send the response back to the leader
-                sendResponse(channel, rpcResponse);
+        synchronized (voteLock) {
+            if (message.getTerm() > currentTerm) {
+                currentTerm = message.getTerm();
+                votedFor = null;
+                PersistentState.saveState(currentTerm, votedFor, logEntries);
+                revertToFollower();
             }
-        } catch (IOException e) {
-            System.err.println("Error sending AppendEntries response: " + e.getMessage());
+
+            // Check if we can accept the entries
+            boolean success = true;
+            if (message.prevLogIndex > lastLogIndex) {
+                System.out.println("Log index mismatch: leader=" + message.prevLogIndex + ", follower=" + lastLogIndex);
+                success = false;
+            }
+
+            // Send response
+            AppendEntriesResponse response = new AppendEntriesResponse(
+                currentTerm,
+                success,
+                address.getHostAddress() + ":" + port
+            );
+
+            try {
+                String jsonResponse = gson.toJson(response);
+                ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
+                channel.write(buffer);
+                System.out.println("Sent AppendEntries response: " + jsonResponse + 
+                    " for command ID: " + message.command.getId() + 
+                    " (success: " + success + ")");
+
+                // If successful, process the command and replicate the log
+                if (success && message.command != null) {
+                    System.out.println("Processing command from AppendEntries with ID: " + message.command.getId());
+                    RpcResponse rpcResponse = executeCommand(message.command);
+                    
+                    // Add log entry
+                    logEntries.add(new LogEntry(
+                        message.command.getMethod(),
+                        message.command.getId(),
+                        message.prevLogIndex + 1,
+                        currentTerm,
+                        (Map<String, Object>) message.command.getParams()
+                    ));
+                    
+                    // Update our log index
+                    lastLogIndex = message.prevLogIndex + 1;
+                    System.out.println("Updated log index to: " + lastLogIndex);
+                    
+                    // Send replication confirmation to leader
+                    Map<String, Object> replicationMsg = new HashMap<>();
+                    replicationMsg.put("type", "LOG_REPLICATION");
+                    replicationMsg.put("commandId", message.command.getId());
+                    replicationMsg.put("followerId", address.getHostAddress() + ":" + port);
+                    replicationMsg.put("success", true);
+                    replicationMsg.put("logIndex", lastLogIndex);
+                    
+                    String replicationJson = gson.toJson(replicationMsg);
+                    buffer = ByteBuffer.wrap((replicationJson + "\n").getBytes());
+                    channel.write(buffer);
+                    System.out.println("Sent log replication confirmation for command " + message.command.getId() + 
+                        " with logIndex: " + lastLogIndex);
+                    
+                    // Send the response back to the leader
+                    sendResponse(channel, rpcResponse);
+
+                    // Save state after adding new log entry
+                    PersistentState.saveState(currentTerm, votedFor, logEntries);
+                }
+            } catch (IOException e) {
+                System.err.println("Error sending AppendEntries response: " + e.getMessage());
+            }
         }
     }
 
@@ -967,8 +965,8 @@ public class RaftNode {
         
         if (response.term > currentTerm) {
             currentTerm = response.term;
-            nodeType = NodeType.FOLLOWER;
             votedFor = null;
+            PersistentState.saveState(currentTerm, votedFor, logEntries);
             return;
         }
 
