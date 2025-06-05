@@ -99,6 +99,49 @@ public class Main {
                         response = "Tidak ada koneksi aktif.";
                     }
                     break;
+                case "cluster":
+                    if (raftClient != null) {
+                        response = raftClient.getCluster();
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
+                    break;
+                
+                case "add-server":
+                    if (raftClient != null) {
+                        if (parts.length == 3) {
+                            String host = parts[1];
+                            try {
+                                int port = Integer.parseInt(parts[2]);
+                                response = raftClient.addServer(host, port);
+                            } catch (NumberFormatException e) {
+                                response = "Port harus berupa angka";
+                            }
+                        } else {
+                            response = "Penggunaan: add-server <host> <port>";
+                        }
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
+                    break;
+                    
+                case "remove-server":
+                    if (raftClient != null) {
+                        if (parts.length == 3) {
+                            String host = parts[1];
+                            try {
+                                int port = Integer.parseInt(parts[2]);
+                                response = raftClient.removeServer(host, port);
+                            } catch (NumberFormatException e) {
+                                response = "Port harus berupa angka";
+                            }
+                        } else {
+                            response = "Penggunaan: remove-server <host> <port>";
+                        }
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
+                    break;
                 default:
                     response = "Perintah tidak dikenal: " + command;
             }

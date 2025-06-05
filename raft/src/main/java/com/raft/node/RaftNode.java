@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.HashSet;  // Add this import
 import java.util.HashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -115,7 +116,12 @@ public class RaftNode {
         this.nodeConnections = new ConcurrentHashMap<>();
         this.currentTerm = 0;
         this.gson = new Gson();
-        
+        // Add to the end of the constructor after initializing clusterMembers
+        // Initialize the configuration
+        Set<ServerInfo> initialServers = new HashSet<>(clusterMembers);
+        this.currentConfig = new ClusterConfiguration(initialServers, 0, ClusterConfiguration.ConfigType.OLD);
+        this.jointConfig = null;
+            
         // Initialize random heartbeat timeout between 5000-7000 milliseconds
         this.heartbeatTimeout = 5000 + random.nextFloat() * 2000;
         this.lastHeartbeatReceived = System.currentTimeMillis();
@@ -141,6 +147,13 @@ public class RaftNode {
             startTimeoutChecker();
         }
     }
+
+    // Add these fields near the top of the RaftNode class
+    private ClusterConfiguration currentConfig;
+    private ClusterConfiguration jointConfig;
+    private boolean inConfigChange = false;
+    private final Object configLock = new Object();
+    private final Set<String> nonVotingMembers = ConcurrentHashMap.newKeySet();
 
     private void initializeClusterMembers() {
         clusterMembers.add(new ServerInfo("raft-node1", 8001, NodeType.FOLLOWER));
@@ -230,7 +243,8 @@ public class RaftNode {
             inElection = true;
             nodeType = NodeType.CANDIDATE;
             currentTerm++;
-            votedFor = address.getHostAddress() + ":" + port;
+            // OR Option 2: Use container names in vote requests
+            votedFor = "raft-node" + port + ":" + port; // Use container name pattern
             receivedVotes = 1; // Vote for self
             System.out.println("Starting election for term " + currentTerm);
         }
@@ -315,53 +329,81 @@ public class RaftNode {
         }
     }
 
+    // Update the handleVoteRequest method
     private void handleVoteRequest(SocketChannel channel, VoteMessage.VoteRequest request) {
-        System.out.println("Handling vote request");
+        System.out.println("Handling vote request from " + request.getCandidateId());
         boolean voteGranted = false;
-        synchronized (voteLock) {
-            if (request.getTerm() < currentTerm) {
-                voteGranted = false;
-            } 
-            else if (request.getTerm() > currentTerm) {
-                currentTerm = request.getTerm();
-                nodeType = NodeType.FOLLOWER;
-                votedFor = null;
-                if (request.getLastLogIndex() >= lastLogIndex && request.getLastLogTerm() >= lastLogTerm) {
-                    votedFor = request.getCandidateId();
-                    voteGranted = true;
-                } else {
-                    voteGranted = false;
-                }
-            } 
-            else { // request.getTerm() == currentTerm
-                if ((votedFor == null || votedFor.equals(request.getCandidateId())) &&
-                   (request.getLastLogIndex() >= lastLogIndex && request.getLastLogTerm() >= lastLogTerm)) {
-                    votedFor = request.getCandidateId();
-                    voteGranted = true;
+        
+        // Ignore RequestVote RPCs if received within heartbeat timeout of current leader
+        long timeSinceLastHeartbeat = System.currentTimeMillis() - lastHeartbeatReceived;
+        if (nodeType == NodeType.FOLLOWER && timeSinceLastHeartbeat < heartbeatTimeout / 2) {
+            System.out.println("Ignoring vote request - received heartbeat recently (" + 
+                            timeSinceLastHeartbeat + "ms ago)");
+            
+            voteGranted = false;
+        } else {
+            synchronized (voteLock) {
+                // Check if candidate is in current configuration
+                String[] candidateParts = request.getCandidateId().split(":");
+                if (candidateParts.length == 2) {
+                    String host = candidateParts[0];
+                    int port;
+                    try {
+                        port = Integer.parseInt(candidateParts[1]);
+                        
+                        // Check if server is in current configuration
+                        if (!currentConfig.containsServer(host, port)) {
+                            System.out.println("Ignoring vote request - server not in configuration");
+                            voteGranted = false;
+                        } else {
+                            // Normal vote logic
+                            if (request.getTerm() < currentTerm) {
+                                voteGranted = false;
+                            } 
+                            else if (request.getTerm() > currentTerm) {
+                                currentTerm = request.getTerm();
+                                nodeType = NodeType.FOLLOWER;
+                                votedFor = null;
+                                if (request.getLastLogIndex() >= lastLogIndex && request.getLastLogTerm() >= lastLogTerm) {
+                                    votedFor = request.getCandidateId();
+                                    voteGranted = true;
+                                } else {
+                                    voteGranted = false;
+                                }
+                            } 
+                            else { // request.getTerm() == currentTerm
+                                if ((votedFor == null || votedFor.equals(request.getCandidateId())) &&
+                                (request.getLastLogIndex() >= lastLogIndex && request.getLastLogTerm() >= lastLogTerm)) {
+                                    votedFor = request.getCandidateId();
+                                    voteGranted = true;
+                                } else {
+                                    voteGranted = false;
+                                }
+                            }
+                        }
+                    } catch (NumberFormatException e) {
+                        voteGranted = false;
+                    }
                 } else {
                     voteGranted = false;
                 }
             }
         }
-        System.out.println("voted for : " + votedFor);
+        
+        System.out.println("Voted for: " + votedFor + ", vote granted: " + voteGranted);
 
         VoteMessage.VoteResponse response = new VoteMessage.VoteResponse(
             currentTerm,
             voteGranted,
-            address.getHostAddress() + ":" + port
+            "raft-node" + port + ":" + port
         );
-
-        long now = System.currentTimeMillis();
-        System.out.println("--------------------------------");
-        System.out.println("created vote response for " + request.getCandidateId() + " response : " + voteGranted + " at " + now/1000 + " s with response type : " + response.getType());
 
         try {
             String jsonResponse = gson.toJson(response);
             ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
             channel.write(buffer);
-            System.out.println("--------------------------------");
-            System.out.println("Write Buffer to " + channel.getRemoteAddress() + " done");
-
+            System.out.println("--------------------------------------------------------------");
+            System.out.println("Sent vote response to " + channel.getRemoteAddress());
         } catch (IOException e) {
             System.err.println("Error sending vote response: " + e.getMessage());
         }
@@ -605,6 +647,7 @@ public class RaftNode {
         }
     }
 
+    // Update the processClientMessage method
     private void processClientMessage(SocketChannel clientChannel, String message) {
         executorService.submit(() -> {
             try {
@@ -623,20 +666,44 @@ public class RaftNode {
                             new RpcResponse.RpcError(-32000, 
                                 "Not leader. Please connect to leader.", 
                                 Map.of("leader_host", leader.getHost(), 
-                                      "leader_port", leader.getPort())));
+                                    "leader_port", leader.getPort())));
                     } else {
                         response = new RpcResponse(rpcMessage.getId(),
                             new RpcResponse.RpcError(-32001, "Leader not found", null));
                     }
                 } else {
-                    // Process the command if this is the leader
-                    response = processCommand(rpcMessage);
+                    // Process based on method
+                    switch (rpcMessage.getMethod()) {
+                        case "add_server":
+                            Map<String, Object> addParams = (Map<String, Object>) rpcMessage.getParams();
+                            String addHost = (String) addParams.get("host");
+                            int addPort = ((Number) addParams.get("port")).intValue();
+                            response = addServer(addHost, addPort);
+                            break;
+                            
+                        case "remove_server":
+                            Map<String, Object> removeParams = (Map<String, Object>) rpcMessage.getParams();
+                            String removeHost = (String) removeParams.get("host");
+                            int removePort = ((Number) removeParams.get("port")).intValue();
+                            response = removeServer(removeHost, removePort);
+                            break;
+                            
+                        case "get_cluster":
+                            response = getClusterConfig(rpcMessage.getId());
+                            break;
+                            
+                        default:
+                            // Process normal command
+                            response = processCommand(rpcMessage);
+                            break;
+                    }
                 }
 
                 // Send response
                 sendResponse(clientChannel, response);
             } catch (Exception e) {
                 System.err.println("Error processing message: " + e.getMessage());
+                e.printStackTrace();
             }
         });
     }
@@ -800,6 +867,18 @@ public class RaftNode {
                 } else {
                     return new RpcResponse(message.getId(), 
                         new RpcResponse.RpcError(-32005, "Key not found", null));
+                }
+
+            case "config_change":
+                // Handle configuration change command
+                try {
+                    executeConfigChange(params);
+                    return new RpcResponse(message.getId(), "Configuration updated");
+                } catch (Exception e) {
+                    System.err.println("Error applying configuration: " + e.getMessage());
+                    e.printStackTrace();
+                    return new RpcResponse(message.getId(), 
+                        new RpcResponse.RpcError(-32016, "Error applying configuration: " + e.getMessage(), null));
                 }
                  
             default:
@@ -1050,5 +1129,490 @@ public class RaftNode {
         } else {
             System.out.println("Received unsuccessful AppendEntries response from " + response.followerId);
         }
+    }
+
+    /**
+     * Adds a new server to the cluster using the joint consensus protocol.
+     */
+    public synchronized RpcResponse addServer(String host, int port) {
+        if (nodeType != NodeType.LEADER) {
+            return new RpcResponse("add_server", 
+                new RpcResponse.RpcError(-32000, "Not leader", null));
+        }
+        
+        synchronized (configLock) {
+            if (inConfigChange) {
+                return new RpcResponse("add_server", 
+                    new RpcResponse.RpcError(-32010, "Configuration change already in progress", null));
+            }
+            
+            // Check if server already exists
+            if (currentConfig.containsServer(host, port)) {
+                return new RpcResponse("add_server", 
+                    new RpcResponse.RpcError(-32011, "Server already exists in configuration", null));
+            }
+            
+            try {
+                // Mark that we're in a configuration change
+                inConfigChange = true;
+                
+                // First, add as non-voting member to catch up
+                ServerInfo newServer = new ServerInfo(host, port, NodeType.FOLLOWER);
+                nonVotingMembers.add(host + ":" + port);
+                
+                // Create connection to new server
+                nodeConnections.put(newServer, new NodeConnection(newServer));
+                
+                System.out.println("Added " + host + ":" + port + " as non-voting member to catch up");
+                
+                // Wait for the new server to catch up (replicate entries)
+                boolean caughtUp = waitForServerCatchUp(newServer);
+                if (!caughtUp) {
+                    nonVotingMembers.remove(host + ":" + port);
+                    nodeConnections.remove(newServer);
+                    inConfigChange = false;
+                    return new RpcResponse("add_server", 
+                        new RpcResponse.RpcError(-32012, "Timed out waiting for server to catch up", null));
+                }
+                
+                // Server has caught up, remove from non-voting members
+                nonVotingMembers.remove(host + ":" + port);
+                
+                // Create joint configuration (Cold,new)
+                Set<ServerInfo> newCluster = currentConfig.getServers();
+                newCluster.add(newServer);
+                
+                // Add to visible members list
+                clusterMembers.add(newServer);
+                
+                // Create and replicate joint consensus configuration
+                long newConfigIndex = lastLogIndex + 1;
+                jointConfig = new ClusterConfiguration(newCluster, newConfigIndex, ClusterConfiguration.ConfigType.JOINT);
+                
+                // Log and commit the joint configuration
+                logConfigurationChange(jointConfig);
+                
+                // Wait for the joint configuration to be committed
+                if (!waitForConfigCommit(jointConfig.getConfigIndex(), 10000)) {
+                    inConfigChange = false;
+                    return new RpcResponse("add_server", 
+                        new RpcResponse.RpcError(-32013, "Failed to commit joint configuration", null));
+                }
+                
+                // Now create the new configuration (Cnew)
+                newConfigIndex = lastLogIndex + 1;
+                ClusterConfiguration newConfig = new ClusterConfiguration(newCluster, newConfigIndex, ClusterConfiguration.ConfigType.NEW);
+                
+                // Log and commit the new configuration
+                logConfigurationChange(newConfig);
+                
+                // Wait for new configuration to be committed
+                if (!waitForConfigCommit(newConfig.getConfigIndex(), 10000)) {
+                    inConfigChange = false;
+                    return new RpcResponse("add_server", 
+                        new RpcResponse.RpcError(-32014, "Failed to commit new configuration", null));
+                }
+                
+                // Update the current configuration
+                currentConfig = newConfig;
+                jointConfig = null;
+                inConfigChange = false;
+                
+                System.out.println("Server " + host + ":" + port + " successfully added to the cluster");
+                return new RpcResponse("add_server", "Server added successfully");
+                
+            } catch (Exception e) {
+                inConfigChange = false;
+                System.err.println("Error adding server: " + e.getMessage());
+                e.printStackTrace();
+                return new RpcResponse("add_server", 
+                    new RpcResponse.RpcError(-32015, "Error adding server: " + e.getMessage(), null));
+            }
+        }
+    }
+
+    /**
+     * Removes a server from the cluster using the joint consensus protocol.
+     */
+    public synchronized RpcResponse removeServer(String host, int port) {
+        if (nodeType != NodeType.LEADER) {
+            return new RpcResponse("remove_server", 
+                new RpcResponse.RpcError(-32000, "Not leader", null));
+        }
+        
+        synchronized (configLock) {
+            if (inConfigChange) {
+                return new RpcResponse("remove_server", 
+                    new RpcResponse.RpcError(-32010, "Configuration change already in progress", null));
+            }
+            
+            // Find the server to remove
+            ServerInfo serverToRemove = currentConfig.getServer(host, port);
+            if (serverToRemove == null) {
+                return new RpcResponse("remove_server", 
+                    new RpcResponse.RpcError(-32011, "Server not found in configuration", null));
+            }
+            
+            // Don't allow removing the current leader (self)
+            if (host.equals(address.getHostName()) && port == this.port) {
+                return new RpcResponse("remove_server", 
+                    new RpcResponse.RpcError(-32012, "Cannot remove current leader", null));
+            }
+            
+            try {
+                // Mark that we're in a configuration change
+                inConfigChange = true;
+                
+                // Create joint configuration (Cold,new) without the server
+                Set<ServerInfo> newCluster = currentConfig.getServers();
+                newCluster.removeIf(s -> s.getHost().equals(host) && s.getPort() == port);
+                
+                // Create and replicate joint consensus configuration
+                long newConfigIndex = lastLogIndex + 1;
+                jointConfig = new ClusterConfiguration(newCluster, newConfigIndex, ClusterConfiguration.ConfigType.JOINT);
+                
+                // Log and commit the joint configuration
+                logConfigurationChange(jointConfig);
+                
+                // Wait for the joint configuration to be committed
+                if (!waitForConfigCommit(jointConfig.getConfigIndex(), 10000)) {
+                    inConfigChange = false;
+                    return new RpcResponse("remove_server", 
+                        new RpcResponse.RpcError(-32013, "Failed to commit joint configuration", null));
+                }
+                
+                // Now create the new configuration (Cnew)
+                newConfigIndex = lastLogIndex + 1;
+                ClusterConfiguration newConfig = new ClusterConfiguration(newCluster, newConfigIndex, ClusterConfiguration.ConfigType.NEW);
+                
+                // Log and commit the new configuration
+                logConfigurationChange(newConfig);
+                
+                // Wait for new configuration to be committed
+                if (!waitForConfigCommit(newConfig.getConfigIndex(), 10000)) {
+                    inConfigChange = false;
+                    return new RpcResponse("remove_server", 
+                        new RpcResponse.RpcError(-32014, "Failed to commit new configuration", null));
+                }
+                
+                // Update the current configuration
+                currentConfig = newConfig;
+                
+                // Remove connection and from cluster members
+                nodeConnections.remove(serverToRemove);
+                clusterMembers.removeIf(s -> s.getHost().equals(host) && s.getPort() == port);
+                
+                // Clear joint config
+                jointConfig = null;
+                inConfigChange = false;
+                
+                System.out.println("Server " + host + ":" + port + " successfully removed from the cluster");
+                return new RpcResponse("remove_server", "Server removed successfully");
+                
+            } catch (Exception e) {
+                inConfigChange = false;
+                System.err.println("Error removing server: " + e.getMessage());
+                e.printStackTrace();
+                return new RpcResponse("remove_server", 
+                    new RpcResponse.RpcError(-32015, "Error removing server: " + e.getMessage(), null));
+            }
+        }
+    }
+
+    /**
+     * Logs a configuration change entry to the Raft log.
+     */
+    private void logConfigurationChange(ClusterConfiguration config) {
+        // Create configuration entry
+        Map<String, Object> configEntry = new HashMap<>();
+        configEntry.put("type", "config_change");
+        configEntry.put("config_index", config.getConfigIndex());
+        configEntry.put("config_id", config.getConfigId());
+        configEntry.put("config_type", config.getType().toString());
+        
+        // Add server information
+        Set<Map<String, Object>> serverInfos = new HashSet<>();
+        for (ServerInfo server : config.getServers()) {
+            Map<String, Object> serverData = new HashMap<>();
+            serverData.put("host", server.getHost());
+            serverData.put("port", server.getPort());
+            serverData.put("node_type", server.getType().toString());
+            serverInfos.add(serverData);
+        }
+        configEntry.put("servers", serverInfos);
+        
+        // Create command
+        String cmdId = "config_" + config.getConfigIndex() + "_" + System.currentTimeMillis();
+        RpcMessage configCommand = new RpcMessage(cmdId, "config_change", configEntry);
+        
+        // Add to command votes
+        CommandVote vote = new CommandVote(configCommand, config.getConfigIndex());
+        commandVotes.put(configCommand.getId(), vote);
+        
+        System.out.println("Logging configuration change: " + config.getType() + 
+                        " at index " + config.getConfigIndex() + 
+                        " with " + config.getServers().size() + " servers");
+        
+        // Replicate to all servers in both configurations
+        for (Map.Entry<ServerInfo, NodeConnection> entry : nodeConnections.entrySet()) {
+            NodeConnection connection = entry.getValue();
+            if (connection.isConnected()) {
+                sendAppendEntries(connection, configCommand);
+            }
+        }
+        
+        // Execute locally
+        executeConfigChange(configEntry);
+    }
+
+    /**
+     * Waits for a configuration to be committed.
+     */
+    private boolean waitForConfigCommit(long configIndex, long timeoutMs) {
+        long startTime = System.currentTimeMillis();
+        
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            // Configuration is committed when majority of both old and new configs have it
+            CommandVote vote = null;
+            
+            // Find the vote for this config index
+            for (CommandVote v : commandVotes.values()) {
+                if (v.logIndex == configIndex) {
+                    vote = v;
+                    break;
+                }
+            }
+            
+            if (vote != null) {
+                // For joint consensus, we need majority in both old and new configurations
+                Set<ServerInfo> servers = currentConfig.getServers();
+                if (jointConfig != null) {
+                    servers.addAll(jointConfig.getServers());
+                }
+                
+                int totalServers = servers.size();
+                int replicationCount = vote.replicatedNodes.size() + 1; // +1 for self
+                
+                if (replicationCount > totalServers / 2) {
+                    System.out.println("Configuration at index " + configIndex + " committed with " + 
+                                    replicationCount + "/" + totalServers + " servers");
+                    return true;
+                }
+            }
+            
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        
+        System.out.println("Timed out waiting for configuration at index " + configIndex + " to be committed");
+        return false;
+    }
+
+    /**
+     * Executes a configuration change locally.
+     */
+    private void executeConfigChange(Map<String, Object> configEntry) {
+        String configType = (String) configEntry.get("config_type");
+        long configIndex = ((Number) configEntry.get("config_index")).longValue();
+        String configId = (String) configEntry.get("config_id");
+        
+        // Parse servers
+        Set<ServerInfo> servers = new HashSet<>();
+        Set<Map<String, Object>> serverInfos = (Set<Map<String, Object>>) configEntry.get("servers");
+        
+        for (Map<String, Object> serverData : serverInfos) {
+            String host = (String) serverData.get("host");
+            int port = ((Number) serverData.get("port")).intValue();
+            NodeType type = NodeType.valueOf((String) serverData.get("node_type"));
+            servers.add(new ServerInfo(host, port, type));
+        }
+        
+        // Create configuration object
+        ClusterConfiguration.ConfigType type = ClusterConfiguration.ConfigType.valueOf(configType);
+        ClusterConfiguration newConfig = new ClusterConfiguration(servers, configIndex, type);
+        
+        // Apply configuration based on type
+        if (type == ClusterConfiguration.ConfigType.JOINT) {
+            // Apply joint configuration
+            jointConfig = newConfig;
+            System.out.println("Applied joint configuration at index " + configIndex);
+        } else if (type == ClusterConfiguration.ConfigType.NEW) {
+            // Apply new configuration
+            currentConfig = newConfig;
+            jointConfig = null;
+            System.out.println("Applied new configuration at index " + configIndex);
+            
+            // If leader is not in new config, step down
+            boolean leaderInConfig = false;
+            for (ServerInfo server : servers) {
+                if (server.getHost().equals(address.getHostName()) && server.getPort() == port) {
+                    leaderInConfig = true;
+                    break;
+                }
+            }
+            
+            if (!leaderInConfig && nodeType == NodeType.LEADER) {
+                System.out.println("Leader not in new configuration, stepping down");
+                nodeType = NodeType.FOLLOWER;
+            }
+        } else {
+            // Apply old configuration (rare case)
+            currentConfig = newConfig;
+            System.out.println("Applied old configuration at index " + configIndex);
+        }
+        
+        // Update log index if necessary
+        if (configIndex > lastLogIndex) {
+            lastLogIndex = configIndex;
+        }
+    }
+
+    /**
+     * Waits for a server to catch up with the leader's log.
+     */
+    private boolean waitForServerCatchUp(ServerInfo newServer) {
+        NodeConnection connection = nodeConnections.get(newServer);
+        if (connection == null || !connection.isConnected()) {
+            try {
+                if (connection == null) {
+                    connection = new NodeConnection(newServer);
+                    nodeConnections.put(newServer, connection);
+                }
+                connection.connect();
+            } catch (IOException e) {
+                System.err.println("Failed to connect to new server during catch-up: " + e.getMessage());
+                return false;
+            }
+        }
+        
+        // Current leader's log state
+        long targetIndex = lastLogIndex;
+        
+        // Transfer all log entries to the new server
+        for (long i = 0; i <= targetIndex; i++) {
+            CommandVote vote = null;
+            
+            // Find command for this log index
+            for (CommandVote v : commandVotes.values()) {
+                if (v.logIndex == i) {
+                    vote = v;
+                    break;
+                }
+            }
+            
+            if (vote != null) {
+                try {
+                    // Send AppendEntries with this log entry
+                    sendAppendEntries(connection, vote.command);
+                    
+                    // Wait briefly for replication
+                    Thread.sleep(100);
+                } catch (Exception e) {
+                    System.err.println("Error sending log entry to new server: " + e.getMessage());
+                    return false;
+                }
+            }
+        }
+        
+        // Wait for server to acknowledge replication
+        long timeout = System.currentTimeMillis() + 10000; // 10 second timeout
+        boolean caughtUp = false;
+        
+        while (System.currentTimeMillis() < timeout) {
+            // Check if server has replicated all entries
+            boolean allReplicated = true;
+            
+            for (CommandVote vote : commandVotes.values()) {
+                if (vote.logIndex <= targetIndex) {
+                    String serverKey = newServer.getHost() + ":" + newServer.getPort();
+                    if (!vote.replicatedNodes.contains(serverKey)) {
+                        allReplicated = false;
+                        break;
+                    }
+                }
+            }
+            
+            if (allReplicated) {
+                caughtUp = true;
+                break;
+            }
+            
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        
+        System.out.println("New server catch-up completed: " + caughtUp);
+        return caughtUp;
+    }
+
+    /**
+     * Returns the current cluster configuration.
+     */
+    public RpcResponse getClusterConfig(String requestId) {
+        Map<String, Object> configInfo = new HashMap<>();
+        
+        configInfo.put("current_config_index", currentConfig.getConfigIndex());
+        configInfo.put("current_config_type", currentConfig.getType().toString());
+        
+        List<Map<String, Object>> serversList = new ArrayList<>();
+        for (ServerInfo server : currentConfig.getServers()) {
+            Map<String, Object> serverInfo = new HashMap<>();
+            serverInfo.put("host", server.getHost());
+            serverInfo.put("port", server.getPort());
+            serverInfo.put("type", server.getType().toString());
+            
+            // Check if connection is active
+            NodeConnection connection = nodeConnections.get(server);
+            boolean connected = connection != null && connection.isConnected();
+            serverInfo.put("connected", connected);
+            
+            // Mark if this is the current node
+            boolean isSelf = server.getHost().equals(address.getHostName()) && server.getPort() == port;
+            serverInfo.put("self", isSelf);
+            
+            // Mark if this is a non-voting member
+            boolean isNonVoting = nonVotingMembers.contains(server.getHost() + ":" + server.getPort());
+            serverInfo.put("non_voting", isNonVoting);
+            
+            serversList.add(serverInfo);
+        }
+        configInfo.put("servers", serversList);
+        
+        // Add joint config info if present
+        if (jointConfig != null) {
+            configInfo.put("joint_config_index", jointConfig.getConfigIndex());
+            configInfo.put("joint_config_type", jointConfig.getType().toString());
+            
+            List<Map<String, Object>> jointServersList = new ArrayList<>();
+            for (ServerInfo server : jointConfig.getServers()) {
+                Map<String, Object> serverInfo = new HashMap<>();
+                serverInfo.put("host", server.getHost());
+                serverInfo.put("port", server.getPort());
+                serverInfo.put("type", server.getType().toString());
+                
+                NodeConnection connection = nodeConnections.get(server);
+                boolean connected = connection != null && connection.isConnected();
+                serverInfo.put("connected", connected);
+                
+                boolean isSelf = server.getHost().equals(address.getHostName()) && server.getPort() == port;
+                serverInfo.put("self", isSelf);
+                
+                boolean isNonVoting = nonVotingMembers.contains(server.getHost() + ":" + server.getPort());
+                serverInfo.put("non_voting", isNonVoting);
+                
+                jointServersList.add(serverInfo);
+            }
+            configInfo.put("joint_servers", jointServersList);
+        }
+        
+        return new RpcResponse(requestId, configInfo);
     }
 }

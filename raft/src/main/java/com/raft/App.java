@@ -8,6 +8,8 @@ import java.net.Socket;
 import java.net.UnknownHostException;
 import java.util.Map;
 import java.util.UUID;
+import java.util.List;  // Add this import
+import java.util.ArrayList;  // Add this import
 
 import com.raft.rpc.RpcMessage;
 import com.raft.rpc.RpcResponse;
@@ -150,5 +152,85 @@ public class App {
 
     public int getCurrentLeaderPort() {
         return currentLeaderPort;
+    }
+
+    // Add these methods to the App class
+    public String addServer(String host, int port) {
+        RpcResponse response = sendRequest("add_server", Map.of("host", host, "port", port));
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        return "Server added: " + response.getResult();
+    }
+
+    public String removeServer(String host, int port) {
+        RpcResponse response = sendRequest("remove_server", Map.of("host", host, "port", port));
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        return "Server removed: " + response.getResult();
+    }
+
+    public String getCluster() {
+        RpcResponse response = sendRequest("get_cluster", null);
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        
+        Map<String, Object> configInfo = (Map<String, Object>) response.getResult();
+        StringBuilder result = new StringBuilder("Cluster Configuration:\n");
+        
+        String configType = (String) configInfo.get("current_config_type");
+        long configIndex = ((Number) configInfo.get("current_config_index")).longValue();
+        
+        result.append(String.format("Config Type: %s, Index: %d\n", configType, configIndex));
+        result.append("Servers:\n");
+        
+        List<Map<String, Object>> servers = (List<Map<String, Object>>) configInfo.get("servers");
+        for (Map<String, Object> server : servers) {
+            String host = (String) server.get("host");
+            int serverPort = ((Number) server.get("port")).intValue();
+            String type = (String) server.get("type");
+            boolean connected = (boolean) server.get("connected");
+            boolean isSelf = (boolean) server.get("self");
+            boolean isNonVoting = server.containsKey("non_voting") ? (boolean) server.get("non_voting") : false;
+            
+            result.append(String.format("  %s:%d (%s) - %s%s%s\n", 
+                host, 
+                serverPort, 
+                type, 
+                connected ? "connected" : "disconnected",
+                isSelf ? " [self]" : "",
+                isNonVoting ? " [non-voting]" : ""));
+        }
+        
+        // Show joint config if present
+        if (configInfo.containsKey("joint_config_index")) {
+            String jointType = (String) configInfo.get("joint_config_type");
+            long jointIndex = ((Number) configInfo.get("joint_config_index")).longValue();
+            
+            result.append(String.format("\nJoint Configuration: %s, Index: %d\n", jointType, jointIndex));
+            
+            List<Map<String, Object>> jointServers = (List<Map<String, Object>>) configInfo.get("joint_servers");
+            if (jointServers != null) {
+                result.append("Joint Config Servers:\n");
+                for (Map<String, Object> server : jointServers) {
+                    String host = (String) server.get("host");
+                    int serverPort = ((Number) server.get("port")).intValue();
+                    String type = (String) server.get("type");
+                    boolean connected = (boolean) server.get("connected");
+                    boolean isSelf = (boolean) server.get("self");
+                    
+                    result.append(String.format("  %s:%d (%s) - %s%s\n", 
+                        host, 
+                        serverPort, 
+                        type, 
+                        connected ? "connected" : "disconnected",
+                        isSelf ? " [self]" : ""));
+                }
+            }
+        }
+        
+        return result.toString();
     }
 }
