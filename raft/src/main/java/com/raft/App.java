@@ -183,6 +183,14 @@ public class App {
         return response.getResult().toString();
     }
 
+    public String getLog() {
+        RpcResponse response = sendRequest("getlog", null);
+        if (response.getError() != null) {
+            return "Error: " + response.getError().getMessage();
+        }
+        return response.getResult().toString();
+    }
+
     public void disconnect() {
         try {
             if (in != null) in.close();

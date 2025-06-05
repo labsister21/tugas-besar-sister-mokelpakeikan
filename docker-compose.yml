@@ -8,6 +8,8 @@ services:
       - raft-network
     ports:
       - "8001:8001"
+    volumes:
+      - raft-data-node1:/data/raft  # Volume untuk raft-node1
     command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node1", "8001", "FOLLOWER"]
 
   raft-node2:
@@ -17,6 +19,8 @@ services:
       - raft-network
     ports:
       - "8002:8002"
+    volumes:
+      - raft-data-node2:/data/raft  # Volume untuk raft-node2
     command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node2", "8002", "FOLLOWER"]
 
   raft-node3:
@@ -26,6 +30,8 @@ services:
       - raft-network
     ports:
       - "8003:8003"
+    volumes:
+      - raft-data-node3:/data/raft  # Volume untuk raft-node3
     command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node3", "8003", "FOLLOWER"]
 
   raft-node4:
@@ -35,6 +41,8 @@ services:
       - raft-network
     ports:
       - "8004:8004"
+    volumes:
+      - raft-data-node4:/data/raft  # Volume untuk raft-node4
     command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node4", "8004", "FOLLOWER"]
 
   raft-node5:
@@ -46,9 +54,9 @@ services:
       - "8005:8005"
     command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.RaftServer", "raft-node5", "8005", "STANDBY"]
 
-  raft-client:
+  raft-client1: # Mengubah nama dari raft-client menjadi raft-client1
     build: .
-    container_name: raft-client
+    container_name: raft-client1
     networks:
       - raft-network
     depends_on:
@@ -57,9 +65,34 @@ services:
       - raft-node3
       - raft-node4
     command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.Main", "raft-node1", "8001"]
-    stdin_open: true  # Untuk input interaktif
-    tty: true        # Untuk terminal interaktif
+    stdin_open: true
+    tty: true
+
+  raft-client2: # Menambahkan container client kedua
+    build: .
+    container_name: raft-client2
+    networks:
+      - raft-network
+    depends_on:
+      - raft-node1
+      - raft-node2
+      - raft-node3
+      - raft-node4
+    # Anda mungkin ingin client kedua terhubung ke node yang berbeda atau sama
+    command: ["java", "-cp", "target/raft-1.0-SNAPSHOT-jar-with-dependencies.jar", "com.raft.Main", "raft-node2", "8002"]
+    stdin_open: true
+    tty: true
 
 networks:
   raft-network:
-    driver: bridge 
+    driver: bridge
+
+volumes: # Definisi volume di tingkat atas
+  raft-data-node1:
+    driver: local
+  raft-data-node2:
+    driver: local
+  raft-data-node3:
+    driver: local
+  raft-data-node4:
+    driver: local
