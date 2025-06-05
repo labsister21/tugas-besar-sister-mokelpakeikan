@@ -1,10 +1,12 @@
 com\raft\node\ServerInfo.class
 com\raft\RaftServer.class
+com\raft\node\RaftNode$ConfigChangeResponse.class
 com\raft\rpc\VoteMessage$VoteRequest.class
 com\raft\node\RaftNode$AppendEntriesResponse.class
 com\raft\rpc\RpcResponse.class
 com\raft\rpc\VoteMessage$VoteResponse.class
 com\raft\node\NodeConnection.class
+com\raft\node\RaftNode$ConfigurationChange.class
 com\raft\rpc\HeartbeatMessage.class
 com\raft\App.class
 com\raft\node\RaftNode$CommandVote.class

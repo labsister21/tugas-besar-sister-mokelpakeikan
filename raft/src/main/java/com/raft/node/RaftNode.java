@@ -52,6 +52,12 @@ public class RaftNode {
     private boolean inElection;
     private final Map<String, CommandVote> commandVotes = new ConcurrentHashMap<>();
     private final int VOTE_TIMEOUT = 5000; // 5 seconds timeout for votes
+    private List<ServerInfo> currentConfig;
+    private List<ServerInfo> jointConfig;
+    private List<ServerInfo> newConfig;
+    private boolean isJointConsensus = false;
+    private long configChangeIndex = -1;
+    private final Map<String, Boolean> configVotes = new ConcurrentHashMap<>();
 
     // Constants
     private static final long HEARTBEAT_INTERVAL = 5000; // 2 seconds
@@ -103,6 +109,44 @@ public class RaftNode {
         }
     }
 
+    // SINIII
+
+    private static class ConfigurationChange {
+        final String type = "CONFIG_CHANGE";
+        final List<ServerInfo> oldConfig;
+        final List<ServerInfo> newConfig;
+        final boolean isJointConsensus;
+        final long term;
+        final String leaderId;
+        final long configIndex;
+        
+        ConfigurationChange(List<ServerInfo> oldConfig, List<ServerInfo> newConfig, boolean isJointConsensus, 
+                            long term, String leaderId, long configIndex) {
+            this.oldConfig = oldConfig;
+            this.newConfig = newConfig;
+            this.isJointConsensus = isJointConsensus;
+            this.term = term;
+            this.leaderId = leaderId;
+            this.configIndex = configIndex;
+        }
+    }
+
+    private static class ConfigChangeResponse {
+        final String type = "CONFIG_CHANGE_RESPONSE";
+        final boolean success;
+        final long term;
+        final String nodeId;
+        
+        ConfigChangeResponse(boolean success, long term, String nodeId) {
+            this.success = success;
+            this.term = term;
+            this.nodeId = nodeId;
+        }
+    }
+
+    // SAMPE SINIII
+
+
     public RaftNode(String hostAddress, int port, NodeType nodeType) throws IOException {
         this.address = InetAddress.getByName(hostAddress);
         this.port = port;
@@ -115,6 +159,10 @@ public class RaftNode {
         this.nodeConnections = new ConcurrentHashMap<>();
         this.currentTerm = 0;
         this.gson = new Gson();
+
+        this.currentConfig = new ArrayList<>(clusterMembers);
+        this.jointConfig = null;
+        this.newConfig = null;
         
         // Initialize random heartbeat timeout between 5000-7000 milliseconds
         this.heartbeatTimeout = 5000 + random.nextFloat() * 2000;
@@ -124,6 +172,7 @@ public class RaftNode {
         this.receivedVotes = 0;
         this.lastLogIndex = 0;  // Initialize log index to 0
         this.lastLogTerm = 0;
+        
         
         initializeClusterMembers();
         for (ServerInfo member : clusterMembers) {
@@ -574,6 +623,14 @@ public class RaftNode {
                         System.out.println("Received AppendEntries response from " + channel.getRemoteAddress());
                         AppendEntriesResponse response = gson.fromJson(message, AppendEntriesResponse.class);
                         handleAppendEntriesResponse(channel, response);
+                    } else if (message.contains("\"type\":\"CONFIG_CHANGE\"")) {
+                        System.out.println("Received configuration change message");
+                        ConfigurationChange configChange = gson.fromJson(message, ConfigurationChange.class);
+                        handleConfigurationChange(channel, configChange);
+                    } else if (message.contains("\"type\":\"CONFIG_CHANGE_RESPONSE\"")) {
+                        System.out.println("Received configuration change response");
+                        ConfigChangeResponse configResponse = gson.fromJson(message, ConfigChangeResponse.class);
+                        handleConfigurationResponse(configResponse);
                     } else if (message.contains("\"type\":\"LOG_REPLICATION\"")) {
                         Map<String, Object> replicationMsg = gson.fromJson(message, Map.class);
                         String commandId = (String) replicationMsg.get("commandId");
@@ -653,6 +710,20 @@ public class RaftNode {
         if (method.equals("ping") || method.equals("get") || method.equals("strln")) {
             System.out.println("Processing read-only command: " + method);
             return executeCommand(message);
+        }
+
+        // Handle cluster membership changes
+        if (method.equals("addServer") || method.equals("removeServer")) {
+            System.out.println("Processing membership change: " + method);
+            Map<String, Object> params = (Map<String, Object>) message.getParams();
+            String host = (String) params.get("host");
+            int port = ((Number) params.get("port")).intValue();
+            
+            if (method.equals("addServer")) {
+                return addServer(host, port);
+            } else {
+                return removeServer(host, port);
+            }
         }
 
         // Only set, append, and del require voting and replication
@@ -1051,4 +1122,444 @@ public class RaftNode {
             System.out.println("Received unsuccessful AppendEntries response from " + response.followerId);
         }
     }
+
+    // SINIII
+
+    public RpcResponse addServer(String host, int port) {
+        if (nodeType != NodeType.LEADER) {
+            ServerInfo leader = clusterMembers.stream()
+                .filter(s -> s.getType() == NodeType.LEADER)
+                .findFirst()
+                .orElse(null);
+                
+            if (leader != null) {
+                return new RpcResponse("addServer", 
+                    new RpcResponse.RpcError(-32000, "Not leader", 
+                        Map.of("leader_host", leader.getHost(), "leader_port", leader.getPort())));
+            } else {
+                return new RpcResponse("addServer",
+                    new RpcResponse.RpcError(-32001, "Leader not found", null));
+            }
+        }
+        
+        // Check if server already exists
+        boolean serverExists = clusterMembers.stream()
+            .anyMatch(s -> s.getHost().equals(host) && s.getPort() == port);
+            
+        if (serverExists) {
+            return new RpcResponse("addServer", 
+                new RpcResponse.RpcError(-32002, "Server already exists in cluster", null));
+        }
+        
+        // Check if configuration change is already in progress
+        if (isJointConsensus || jointConfig != null || newConfig != null) {
+            return new RpcResponse("addServer", 
+                new RpcResponse.RpcError(-32003, "Configuration change already in progress", null));
+        }
+        
+        // Create new server info
+        ServerInfo newServer = new ServerInfo(host, port, NodeType.FOLLOWER);
+        
+        // First, add as non-voting member to catch up
+        System.out.println("Adding server " + host + ":" + port + " as non-voting member");
+        
+        // Create connection to new server
+        NodeConnection connection = new NodeConnection(newServer);
+        try {
+            connection.connect();
+            nodeConnections.put(newServer, connection);
+        } catch (IOException e) {
+            System.err.println("Failed to connect to new server: " + e.getMessage());
+            return new RpcResponse("addServer", 
+                new RpcResponse.RpcError(-32004, "Failed to connect to new server", null));
+        }
+        
+        // Start replicating logs to the new server (non-voting)
+        replicateLogsToNewServer(connection);
+        
+        // Create new configuration that includes the new server
+        newConfig = new ArrayList<>(currentConfig);
+        newConfig.add(newServer);
+        
+        // Start the two-phase configuration change
+        startJointConsensus();
+        
+        return new RpcResponse("addServer", "Server addition initiated");
+    }
+
+    private void replicateLogsToNewServer(NodeConnection connection) {
+        // This would replicate all logs to bring the new server up to date
+        // For now, we'll simulate this with a simple message
+        try {
+            connection.send(gson.toJson(Map.of(
+                "type", "SYNC_LOGS",
+                "leaderId", address.getHostAddress() + ":" + port,
+                "term", currentTerm,
+                "lastLogIndex", lastLogIndex,
+                "lastLogTerm", lastLogTerm
+            )));
+            System.out.println("Started log replication to new server");
+        } catch (IOException e) {
+            System.err.println("Error replicating logs to new server: " + e.getMessage());
+        }
+    }
+
+    // Method to remove a server from the cluster
+    public RpcResponse removeServer(String host, int port) {
+        if (nodeType != NodeType.LEADER) {
+            ServerInfo leader = clusterMembers.stream()
+                .filter(s -> s.getType() == NodeType.LEADER)
+                .findFirst()
+                .orElse(null);
+                
+            if (leader != null) {
+                return new RpcResponse("removeServer", 
+                    new RpcResponse.RpcError(-32000, "Not leader", 
+                        Map.of("leader_host", leader.getHost(), "leader_port", leader.getPort())));
+            } else {
+                return new RpcResponse("removeServer",
+                    new RpcResponse.RpcError(-32001, "Leader not found", null));
+            }
+        }
+        
+        // Check if server exists
+        boolean serverExists = clusterMembers.stream()
+            .anyMatch(s -> s.getHost().equals(host) && s.getPort() == port);
+            
+        if (!serverExists) {
+            return new RpcResponse("removeServer", 
+                new RpcResponse.RpcError(-32002, "Server does not exist in cluster", null));
+        }
+        
+        // Check if configuration change is already in progress
+        if (isJointConsensus || jointConfig != null || newConfig != null) {
+            return new RpcResponse("removeServer", 
+                new RpcResponse.RpcError(-32003, "Configuration change already in progress", null));
+        }
+        
+        // Check if we're removing ourselves (leader)
+        boolean removingLeader = host.equals(address.getHostAddress()) && port == this.port;
+        
+        // Check if we'll have enough servers left
+        if (clusterMembers.size() <= 1 || (clusterMembers.size() <= 2 && removingLeader)) {
+            return new RpcResponse("removeServer", 
+                new RpcResponse.RpcError(-32005, "Cannot remove server: cluster would be too small", null));
+        }
+        
+        // Create new configuration without the removed server
+        newConfig = currentConfig.stream()
+            .filter(s -> !(s.getHost().equals(host) && s.getPort() == port))
+            .collect(java.util.stream.Collectors.toList());
+        
+        // Start the two-phase configuration change
+        startJointConsensus();
+        
+        return new RpcResponse("removeServer", "Server removal initiated");
+    }
+
+    private void startJointConsensus() {
+        if (newConfig == null) {
+            System.err.println("Cannot start joint consensus: newConfig is null");
+            return;
+        }
+        
+        System.out.println("Starting joint consensus phase");
+        jointConfig = new ArrayList<>();
+        jointConfig.addAll(currentConfig);
+        jointConfig.addAll(newConfig.stream()
+            .filter(s -> currentConfig.stream()
+                .noneMatch(c -> c.getHost().equals(s.getHost()) && c.getPort() == s.getPort()))
+            .collect(java.util.stream.Collectors.toList()));
+        
+        // Create configuration change entry for joint consensus (Cold,new)
+        ConfigurationChange jointChange = new ConfigurationChange(
+            currentConfig, newConfig, true, currentTerm,
+            address.getHostAddress() + ":" + port, lastLogIndex + 1
+        );
+        
+        configChangeIndex = lastLogIndex + 1;
+        
+        // Send joint config to all servers in both old and new configs
+        for (ServerInfo server : jointConfig) {
+            NodeConnection connection = nodeConnections.get(server);
+            if (connection == null && server.getPort() != this.port) { // Skip self
+                connection = new NodeConnection(server);
+                nodeConnections.put(server, connection);
+                try {
+                    connection.connect();
+                } catch (IOException e) {
+                    System.err.println("Failed to connect to server " + server + ": " + e.getMessage());
+                    continue;
+                }
+            }
+            
+            if (server.getPort() == this.port) { // Self
+                // Apply joint config locally
+                applyJointConsensus(jointChange);
+                continue;
+            }
+            
+            if (connection != null && connection.isConnected()) {
+                try {
+                    connection.send(gson.toJson(jointChange));
+                    System.out.println("Sent joint consensus config to " + server.getHost() + ":" + server.getPort());
+                } catch (IOException e) {
+                    System.err.println("Error sending joint config to " + server + ": " + e.getMessage());
+                }
+            }
+        }
+        
+        // Clear configuration votes
+        configVotes.clear();
+        
+        // Add self-vote
+        String selfId = address.getHostAddress() + ":" + port;
+        configVotes.put(selfId, true);
+        
+        // Start checking for config change completion
+        scheduleConfigChangeCheck();
+    }
+
+    private void applyJointConsensus(ConfigurationChange config) {
+        System.out.println("Applying joint consensus configuration");
+        isJointConsensus = true;
+        lastLogIndex = config.configIndex;
+        
+        // Update local info
+        this.currentConfig = new ArrayList<>(config.oldConfig);
+        this.newConfig = new ArrayList<>(config.newConfig);
+        
+        // Debug info
+        System.out.println("Joint consensus active: using both old and new configurations for decisions");
+        System.out.println("Old config servers: " + config.oldConfig.size());
+        System.out.println("New config servers: " + config.newConfig.size());
+    }
+
+    private void finishConfiguration() {
+        if (!isJointConsensus || newConfig == null) {
+            System.err.println("Cannot finish configuration: not in joint consensus or newConfig is null");
+            return;
+        }
+        
+        System.out.println("Starting final phase of configuration change");
+        
+        // Create configuration change entry for new config only (Cnew)
+        ConfigurationChange newChange = new ConfigurationChange(
+            null, newConfig, false, currentTerm,
+            address.getHostAddress() + ":" + port, lastLogIndex + 1
+        );
+        
+        configChangeIndex = lastLogIndex + 1;
+        
+        // Send new config to all servers in new config
+        for (ServerInfo server : newConfig) {
+            NodeConnection connection = nodeConnections.get(server);
+            if (connection == null && server.getPort() != this.port) { // Skip self
+                System.err.println("Missing connection for " + server);
+                continue;
+            }
+            
+            if (server.getPort() == this.port) { // Self
+                // Apply new config locally
+                applyNewConfiguration(newChange);
+                continue;
+            }
+            
+            if (connection != null && connection.isConnected()) {
+                try {
+                    connection.send(gson.toJson(newChange));
+                    System.out.println("Sent new configuration to " + server);
+                } catch (IOException e) {
+                    System.err.println("Error sending new config to " + server + ": " + e.getMessage());
+                }
+            }
+        }
+        
+        // Clear configuration votes again
+        configVotes.clear();
+        
+        // Add self-vote
+        String selfId = address.getHostAddress() + ":" + port;
+        configVotes.put(selfId, true);
+        
+        // Continue checking for config change completion
+        scheduleConfigChangeCheck();
+    }
+
+    private void applyNewConfiguration(ConfigurationChange config) {
+        System.out.println("Applying new configuration");
+        isJointConsensus = false;
+        lastLogIndex = config.configIndex;
+        
+        // Update local info
+        this.currentConfig = new ArrayList<>(config.newConfig);
+        this.jointConfig = null;
+        
+        // Update clusterMembers to reflect new configuration
+        clusterMembers.clear();
+        clusterMembers.addAll(currentConfig);
+        
+        // Check if we're still in the configuration
+        boolean stillInConfig = currentConfig.stream()
+            .anyMatch(s -> s.getHost().equals(address.getHostAddress()) && s.getPort() == port);
+        
+        if (!stillInConfig) {
+            System.out.println("This server is no longer in the new configuration. Stepping down.");
+            nodeType = NodeType.FOLLOWER;
+            // Stop heartbeat if we're stepping down
+            if (heartbeatExecutor != null) {
+                heartbeatExecutor.shutdown();
+            }
+        }
+        
+        // Debug info
+        System.out.println("New configuration active with " + config.newConfig.size() + " servers");
+        
+        // Clean up connections to servers not in new config
+        for (Iterator<Map.Entry<ServerInfo, NodeConnection>> it = nodeConnections.entrySet().iterator(); it.hasNext();) {
+            Map.Entry<ServerInfo, NodeConnection> entry = it.next();
+            ServerInfo server = entry.getKey();
+            
+            boolean inNewConfig = currentConfig.stream()
+                .anyMatch(s -> s.getHost().equals(server.getHost()) && s.getPort() == server.getPort());
+                
+            if (!inNewConfig) {
+                System.out.println("Closing connection to server no longer in config: " + server);
+                entry.getValue().disconnect();
+                it.remove();
+            }
+        }
+    }
+
+    private void scheduleConfigChangeCheck() {
+        heartbeatExecutor.schedule(() -> {
+            // Check if we have majority acceptance for config change
+            int requiredVotes;
+            
+            if (isJointConsensus) {
+                // During joint consensus, we need majority from both old and new configs
+                int oldConfigSize = currentConfig.size();
+                int newConfigSize = newConfig.size();
+                int oldMajority = oldConfigSize / 2 + 1;
+                int newMajority = newConfigSize / 2 + 1;
+                
+                // Count votes from old and new configs separately
+                long oldVotes = configVotes.entrySet().stream()
+                    .filter(Map.Entry::getValue)
+                    .filter(e -> {
+                        String[] parts = e.getKey().split(":");
+                        String host = parts[0];
+                        int port = Integer.parseInt(parts[1]);
+                        return currentConfig.stream()
+                            .anyMatch(s -> s.getHost().equals(host) && s.getPort() == port);
+                    })
+                    .count();
+                    
+                long newVotes = configVotes.entrySet().stream()
+                    .filter(Map.Entry::getValue)
+                    .filter(e -> {
+                        String[] parts = e.getKey().split(":");
+                        String host = parts[0];
+                        int port = Integer.parseInt(parts[1]);
+                        return newConfig.stream()
+                            .anyMatch(s -> s.getHost().equals(host) && s.getPort() == port);
+                    })
+                    .count();
+                    
+                System.out.println("Joint consensus votes - Old config: " + oldVotes + "/" + oldMajority + 
+                    ", New config: " + newVotes + "/" + newMajority);
+                    
+                // We need majority in both configs
+                if (oldVotes >= oldMajority && newVotes >= newMajority) {
+                    System.out.println("Joint consensus achieved! Moving to final configuration phase");
+                    finishConfiguration();
+                    return;
+                }
+            } else {
+                // For final config, we just need majority of new config
+                int newConfigSize = currentConfig.size();
+                requiredVotes = newConfigSize / 2 + 1;
+                
+                long totalVotes = configVotes.values().stream().filter(v -> v).count();
+                System.out.println("New configuration votes: " + totalVotes + "/" + requiredVotes);
+                
+                if (totalVotes >= requiredVotes) {
+                    System.out.println("New configuration committed! Configuration change complete");
+                    
+                    // Configuration change is complete, clean up
+                    newConfig = null;
+                    configChangeIndex = -1;
+                    return;
+                }
+            }
+            
+            // If we haven't achieved consensus, retry after a delay
+            if (configChangeIndex != -1) {
+                scheduleConfigChangeCheck();
+            }
+        }, 1000, MILLISECONDS);
+    }
+
+    // Add these methods to handle configuration change messages
+    private void handleConfigurationChange(SocketChannel channel, ConfigurationChange config) {
+        if (config.term < currentTerm) {
+            // Reject older terms
+            sendConfigResponse(channel, false);
+            return;
+        }
+        
+        if (config.term > currentTerm) {
+            currentTerm = config.term;
+            nodeType = NodeType.FOLLOWER;
+        }
+        
+        System.out.println("Received configuration change from leader");
+        
+        // Update configuration based on message type
+        if (config.isJointConsensus) {
+            applyJointConsensus(config);
+        } else {
+            applyNewConfiguration(config);
+        }
+        
+        // Send response to leader
+        sendConfigResponse(channel, true);
+    }
+
+    private void sendConfigResponse(SocketChannel channel, boolean success) {
+        try {
+            ConfigChangeResponse response = new ConfigChangeResponse(
+                success, 
+                currentTerm, 
+                address.getHostAddress() + ":" + port
+            );
+            
+            String jsonResponse = gson.toJson(response);
+            ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
+            channel.write(buffer);
+            
+            System.out.println("Sent configuration change response: " + success);
+        } catch (IOException e) {
+            System.err.println("Error sending config response: " + e.getMessage());
+        }
+    }
+
+    private void handleConfigurationResponse(ConfigChangeResponse response) {
+        if (response.term > currentTerm) {
+            currentTerm = response.term;
+            nodeType = NodeType.FOLLOWER;
+            return;
+        }
+        
+        if (configChangeIndex == -1) {
+            // No ongoing config change, ignore
+            return;
+        }
+        
+        // Record the vote
+        configVotes.put(response.nodeId, response.success);
+        System.out.println("Received config change response from " + response.nodeId + ": " + response.success);
+    }
+
+    // SAMPE SINIII
 }

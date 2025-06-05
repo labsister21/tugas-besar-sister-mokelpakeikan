@@ -44,6 +44,41 @@ public class Main {
                         response = "Penggunaan: connect <host> <port>";
                     }
                     break;
+                case "add-server":
+                    if (raftClient != null) {
+                        if (parts.length == 3) {
+                            String serverHost = parts[1];
+                            try {
+                                int serverPort = Integer.parseInt(parts[2]);
+                                response = raftClient.addServer(serverHost, serverPort);
+                            } catch (NumberFormatException e) {
+                                response = "Port harus berupa angka";
+                            }
+                        } else {
+                            response = "Penggunaan: add-server <host> <port>";
+                        }
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
+                    break;
+                    
+                case "remove-server":
+                    if (raftClient != null) {
+                        if (parts.length == 3) {
+                            String serverHost = parts[1];
+                            try {
+                                int serverPort = Integer.parseInt(parts[2]);
+                                response = raftClient.removeServer(serverHost, serverPort);
+                            } catch (NumberFormatException e) {
+                                response = "Port harus berupa angka";
+                            }
+                        } else {
+                            response = "Penggunaan: remove-server <host> <port>";
+                        }
+                    } else {
+                        response = "Belum terhubung ke server. Gunakan 'connect <host> <port>' terlebih dahulu.";
+                    }
+                    break;
                 case "ping":
                     if (raftClient != null) {
                         response = raftClient.ping();
