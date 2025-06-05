@@ -114,13 +114,8 @@ public class RaftNode {
             System.out.println("Cluster member: " + member.getHost() + ":" + member.getPort());
         }
 
-        if (nodeType == NodeType.LEADER) {
-            System.out.println("Node ini adalah leader dengan log index: " + lastLogIndex);
-            startHeartbeat();
-        } else {
-            System.out.printf("Node ini adalah follower dengan timeout %.2f ms dan log index: %d%n", heartbeatTimeout, lastLogIndex);
-            startTimeoutChecker();
-        }
+        startTimeoutChecker();
+
     }
 
     private void initializeClusterMembers() {
@@ -186,10 +181,8 @@ public class RaftNode {
             // Only print on even timestamps
             if (lastHeartbeatReceived % 2 == 0) {
                 long now = System.currentTimeMillis();
-                System.out.println("--------------------------------");
                 System.out.println("Received heartbeat from leader: " + heartbeat.getLeaderId() + 
                                  " (term: " + heartbeat.getTerm() + " heartbeat got on " + (now-this.lastHeartbeatReceived) + " , timestamp : "+now+")");
-                System.out.println("--------------------------------");
             }
             lastHeartbeatReceived = System.currentTimeMillis();
             inElection = false;  // Reset election state when heartbeat received
@@ -236,14 +229,6 @@ public class RaftNode {
             if (!connection.isConnected()) {
                 try {
 
-                    System.out.println("MASUKKK IS CONNECTED !!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                    // boolean Connected = connection.connect();
-                    // if (!Connected) {
-                    //     SocketChannel peerChannel = connection.getChannel();
-                    //     peerChannel.register(this.selector, SelectionKey.OP_CONNECT, voteRequest); // Attach voteRequest
-                    //     this.selector.wakeup();
-                    //     continue;
-                    // }
                     connection.connect();
                     
                 } catch (IOException e) {
@@ -333,14 +318,12 @@ public class RaftNode {
         );
 
         long now = System.currentTimeMillis();
-        System.out.println("--------------------------------");
         System.out.println("created vote response for " + request.getCandidateId() + " response : " + voteGranted + " at " + now/1000 + " s with response type : " + response.getType());
 
         try {
             String jsonResponse = gson.toJson(response);
             ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
             channel.write(buffer);
-            System.out.println("--------------------------------");
             System.out.println("Write Buffer to " + channel.getRemoteAddress() + " done");
 
         } catch (IOException e) {
@@ -424,7 +407,6 @@ public class RaftNode {
                 Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
 
                 while (keys.hasNext()) {
-                    System.out.println("!!!!!!!!!!!! MASUK WHILEEEEE !!!!!!!!!!!!");
                     SelectionKey key = keys.next();
                     keys.remove();
 
@@ -433,13 +415,10 @@ public class RaftNode {
                     }
 
                     if (key.isAcceptable()) {
-                        System.out.println("!!!!!!!!! ACCEPTTTTT !!!!!!!!!!!!!!");
                         accept(key);
                     } else if (key.isReadable()) {
-                        System.out.println("!!!!!!!!! READDDDDD !!!!!!!!!!!!!!");
                         read(key);
                     }else if (key.isConnectable()) {
-                        System.out.println("!!!!!!!!!!!!! CONNECT !!!!!!!!!!!!");
                         handleConnect(key);
                     }
                 }
@@ -513,7 +492,6 @@ public class RaftNode {
             int bytesRead = channel.read(buffer);
             System.out.println("Read " + bytesRead + " bytes from " + channel.getRemoteAddress());
             if (bytesRead == -1) {
-                System.out.println("--------------------------------");
                 System.out.println("bytes read : " + bytesRead + " connection closed from " + channel.getRemoteAddress());
                 System.out.println("--------------------------------");
                 closeConnection(channel);
@@ -527,23 +505,18 @@ public class RaftNode {
                 buffer.clear();
 
                 String message = new String(data).trim();
-                System.out.println("--------------------------------");
                 System.out.println("message recieved from " + channel.getRemoteAddress() + " : " + message);
-                System.out.println("--------------------------------");
                 
-                System.out.println("MASUKKKKKKKKK SINIIIIIIII !!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                 // Parse message to determine type
                 try {
                     if (message.contains("\"type\":\"HEARTBEAT\"")) {
                         handleHeartbeat(message);
                     } else if (message.contains("\"type\":\"VOTE_REQUEST\"")) {
-                        System.out.println("MASUK KE VOTE REQUESTTTTTTTTTTTTTTTTTTT !!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                         inElection = true;
                         System.out.println("Received vote request from " + channel.getRemoteAddress());
                         VoteMessage.VoteRequest voteRequest = gson.fromJson(message, VoteMessage.VoteRequest.class);
                         handleVoteRequest(channel, voteRequest);
                     } else if (message.contains("\"type\":\"VOTE_RESPONSE\"")) {
-                        System.out.println("MASUK KE VOTE RESPONSEEEEEEEEEEEEEEEEEEEEEE !!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                         System.out.println("Received vote response from " + channel.getRemoteAddress());
                         VoteMessage.VoteResponse voteResponse = gson.fromJson(message, VoteMessage.VoteResponse.class);
                         handleVoteResponse(voteResponse);
@@ -572,7 +545,6 @@ public class RaftNode {
                         }
                         return;
                     } else {
-                        System.out.println("MASUK KE PROCESS CLIENT MESSAGEEEEEEEEEEEEEEEEEEEEE !!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
                         processClientMessage(channel, message);
                     }
                 } catch (Exception e) {
@@ -828,7 +800,6 @@ public class RaftNode {
 
     private void handleCommandVote(SocketChannel channel, RpcMessage message) {
         // Add vote for the command
-        System.out.println("MASUKKKKKKKKK Handle Command Vote !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         CommandVote vote = commandVotes.get(message.getId());
         if (vote != null) {
             try {
