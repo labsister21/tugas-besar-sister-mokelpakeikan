@@ -165,6 +165,11 @@ public class RaftNode {
         
         
         initializeClusterMembers();
+
+        this.currentConfig = new ArrayList<>(clusterMembers);
+        this.jointConfig = null;
+        this.newConfig = null;
+
         for (ServerInfo member : clusterMembers) {
             if (member.getPort() != this.port) {
                 this.nodeConnections.put(member, new NodeConnection(member));
@@ -522,7 +527,7 @@ public class RaftNode {
 
     private NodeConnection findNodeConnectionForChannel(SocketChannel channel) {
         for (NodeConnection nc : nodeConnections.values()) {
-            if (nc.getChannel() == channel) { // Perbandingan referensi, pastikan ini benar
+            if (nc.getChannel() == channel) { // Perbandingan referensi
                 return nc;
             }
         }
@@ -669,8 +674,8 @@ public class RaftNode {
                 new RpcResponse.RpcError(-32000, "Not leader", null));
         }
 
-        String method = message.getMethod().toLowerCase(); // Convert to lowercase for case-insensitive comparison
-        
+        String method = message.getMethod().toLowerCase(); 
+        System.out.println("method : "+method);
         // Handle read-only commands directly
         if (method.equals("ping") || method.equals("get") || method.equals("strln")) {
             System.out.println("Processing read-only command: " + method);
@@ -678,13 +683,13 @@ public class RaftNode {
         }
 
         // Handle cluster membership changes
-        if (method.equals("addServer") || method.equals("removeServer")) {
+        if (method.equals("addserver") || method.equals("removeserver")) {
             System.out.println("Processing membership change: " + method);
             Map<String, Object> params = (Map<String, Object>) message.getParams();
             String host = (String) params.get("host");
             int port = ((Number) params.get("port")).intValue();
             
-            if (method.equals("addServer")) {
+            if (method.equals("addserver")) {
                 return addServer(host, port);
             } else {
                 return removeServer(host, port);
@@ -694,7 +699,7 @@ public class RaftNode {
         // Only set, append, and del require voting and replication
         if (!method.equals("set") && !method.equals("append") && !method.equals("del")) {
             return new RpcResponse(message.getId(), 
-                new RpcResponse.RpcError(-32601, "Method not supported", null));
+                new RpcResponse.RpcError(-32601, "Method not supported in", null));
         }
 
         // Create a new command vote with current log index
@@ -1122,8 +1127,6 @@ public class RaftNode {
     }
 
     private void replicateLogsToNewServer(NodeConnection connection) {
-        // This would replicate all logs to bring the new server up to date
-        // For now, we'll simulate this with a simple message
         try {
             connection.send(gson.toJson(Map.of(
                 "type", "SYNC_LOGS",
@@ -1204,11 +1207,19 @@ public class RaftNode {
             .filter(s -> currentConfig.stream()
                 .noneMatch(c -> c.getHost().equals(s.getHost()) && c.getPort() == s.getPort()))
             .collect(java.util.stream.Collectors.toList()));
+
+        System.out.println("CURRENT CONFIG: " + currentConfig);
+        System.out.println("NEW CONFIG: " + newConfig);
+        System.out.println("JOINT CONFIG: " + jointConfig);
         
         // Create configuration change entry for joint consensus (Cold,new)
         ConfigurationChange jointChange = new ConfigurationChange(
-            currentConfig, newConfig, true, currentTerm,
-            address.getHostAddress() + ":" + port, lastLogIndex + 1
+            currentConfig.isEmpty() ? null : currentConfig, 
+            newConfig, 
+            true, 
+            currentTerm,
+            address.getHostAddress() + ":" + port, 
+            lastLogIndex + 1
         );
         
         configChangeIndex = lastLogIndex + 1;
@@ -1227,7 +1238,7 @@ public class RaftNode {
                 }
             }
             
-            if (server.getPort() == this.port) { // Self
+            if (server.getPort() == this.port) { 
                 // Apply joint config locally
                 applyJointConsensus(jointChange);
                 continue;
@@ -1243,7 +1254,7 @@ public class RaftNode {
             }
         }
         
-        // Clear configuration votes
+        
         configVotes.clear();
         
         // Add self-vote
@@ -1260,8 +1271,14 @@ public class RaftNode {
         lastLogIndex = config.configIndex;
         
         // Update local info
-        this.currentConfig = new ArrayList<>(config.oldConfig);
+        if (config.oldConfig != null && !config.oldConfig.isEmpty()) {
+            this.currentConfig = new ArrayList<>(config.oldConfig);
+        }
         this.newConfig = new ArrayList<>(config.newConfig);
+
+        System.out.println("APPL JOINT CONFIGGGGG " + newConfig);
+        System.out.println("APPL CURRENT CONFIGGG: " + currentConfig);
+        System.out.println("APPL NEW CONFIGGG: " + newConfig);
         
         // Debug info
         System.out.println("Joint consensus active: using both old and new configurations for decisions");
@@ -1309,7 +1326,7 @@ public class RaftNode {
             }
         }
         
-        // Clear configuration votes again
+        
         configVotes.clear();
         
         // Add self-vote
@@ -1346,7 +1363,7 @@ public class RaftNode {
             }
         }
         
-        // Debug info
+        
         System.out.println("New configuration active with " + config.newConfig.size() + " servers");
         
         // Clean up connections to servers not in new config
