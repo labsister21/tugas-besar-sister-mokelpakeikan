@@ -156,7 +156,7 @@ public class RaftNode {
         this.logEntries.addAll(state.getLog());
         
         // Initialize random heartbeat timeout between 5000-7000 milliseconds
-        this.heartbeatTimeout = 5000 + random.nextFloat() * 2000;
+        this.heartbeatTimeout = 6000 + random.nextFloat() * 4000;
         this.lastHeartbeatReceived = System.currentTimeMillis();
         
         this.receivedVotes = 0;
@@ -194,13 +194,14 @@ public class RaftNode {
 
     private void startTimeoutChecker() {
         heartbeatExecutor.scheduleAtFixedRate(() -> {
-            if (nodeType == NodeType.LEADER) {
+            if (nodeType != NodeType.FOLLOWER) {
                 return;  // Leader tidak perlu mengecek timeout
             }
             
             long now = System.currentTimeMillis();
             if (now - lastHeartbeatReceived > heartbeatTimeout && !inElection) {
                 System.out.println("No heartbeat received for " + (now - lastHeartbeatReceived) + " ms. Starting election!");
+                lastHeartbeatReceived = now;
                 startElection();
             }
         }, 1000, 1000, MILLISECONDS);
@@ -271,10 +272,11 @@ public class RaftNode {
             // Update term if necessary
             if (heartbeat.getTerm() > currentTerm) {
                 currentTerm = heartbeat.getTerm();
-                votedFor = null;
                 PersistentState.saveState(currentTerm, votedFor, logEntries);
                 if (nodeType == NodeType.CANDIDATE) {
                     cancelCandidation();
+                }else{
+                    revertToFollower();
                 }
             }
         } catch (Exception e) {
@@ -344,6 +346,7 @@ public class RaftNode {
                 inElection = false;
                 nodeType = NodeType.FOLLOWER;
                 votedFor = null;
+                System.out.println("votedfor becomes null in cancelcandidation");
             }
         }
     }
@@ -375,19 +378,23 @@ public class RaftNode {
 
     private void handleVoteRequest(SocketChannel channel, VoteMessage.VoteRequest request) {
         boolean voteGranted = false;
+        System.out.println("recieved vote request with current term : " + currentTerm + " and voted for : " + votedFor);
         synchronized (voteLock) {
             if (request.getTerm() > currentTerm) {
                 currentTerm = request.getTerm();
-                votedFor = null;
-                PersistentState.saveState(currentTerm, votedFor, logEntries);
                 revertToFollower();
+                
+                lastHeartbeatReceived = System.currentTimeMillis();
+                PersistentState.saveState(currentTerm, votedFor, logEntries);
             }
-
-            if (request.getTerm() == currentTerm && 
-                (votedFor == null || votedFor.equals(request.getCandidateId()))) {
+            
+            boolean logUpToDate = (request.getLastLogTerm() > lastLogTerm || (request.getLastLogTerm() == lastLogTerm && request.getLastLogIndex() >= lastLogIndex));
+            if (request.getTerm() == currentTerm && (votedFor == null || votedFor.equals(request.getCandidateId())) && logUpToDate) {
+                revertToFollower();
                 votedFor = request.getCandidateId();
                 PersistentState.saveState(currentTerm, votedFor, logEntries);
                 voteGranted = true;
+                lastHeartbeatReceived = System.currentTimeMillis();
             }
         }
         System.out.println("voted for : " + votedFor);
@@ -413,17 +420,17 @@ public class RaftNode {
     }
 
     private void handleVoteResponse(VoteMessage.VoteResponse response) {
+        if (nodeType != NodeType.CANDIDATE) {
+            System.out.println("Ignoring vote - no longer a candidate");
+            return;
+        }
+
         System.out.println("=== Vote Response Processing ===");
         System.out.println("Current node type: " + nodeType);
         System.out.println("Response from: " + response.getVoterId());
         System.out.println("Vote granted: " + response.isVoteGranted());
         System.out.println("Current votes: " + receivedVotes);
         System.out.println("handling vote response from " + response.getVoterId() + " with term " + response.getTerm());
-
-        if (nodeType != NodeType.CANDIDATE) {
-            System.out.println("Ignoring vote - no longer a candidate");
-            return;
-        }
 
         if (response.getTerm() > currentTerm) {
             currentTerm = response.getTerm();
@@ -467,17 +474,22 @@ public class RaftNode {
                 }
             }
             
-            votedFor = null;
             startHeartbeat();
         }
     }
 
     private void revertToFollower() {
-        nodeType = NodeType.FOLLOWER;
-        votedFor = null;
+        synchronized (voteLock) {
+            nodeType = NodeType.FOLLOWER;
+            votedFor = null;
+            receivedVotes = 0;
+            System.out.println("votedfor becomes null in reverttofollower");
+        }
+
     }
 
     public void startServer() throws IOException {
+        lastHeartbeatReceived = System.currentTimeMillis();
         selector = Selector.open();
         serverSocket = ServerSocketChannel.open();
         serverSocket.bind(new InetSocketAddress(address, port));
@@ -595,7 +607,6 @@ public class RaftNode {
                     if (message.contains("\"type\":\"HEARTBEAT\"")) {
                         handleHeartbeat(message);
                     } else if (message.contains("\"type\":\"VOTE_REQUEST\"")) {
-                        inElection = true;
                         System.out.println("Received vote request from " + channel.getRemoteAddress());
                         VoteMessage.VoteRequest voteRequest = gson.fromJson(message, VoteMessage.VoteRequest.class);
                         handleVoteRequest(channel, voteRequest);
@@ -1012,7 +1023,6 @@ public class RaftNode {
                 // Update term if message term is higher
                 if (message.getTerm() > currentTerm) {
                     currentTerm = message.getTerm();
-                    votedFor = null;
                     PersistentState.saveState(currentTerm, votedFor, logEntries);
                     revertToFollower();
                 }
@@ -1091,7 +1101,6 @@ public class RaftNode {
         
         if (response.getTerm() > currentTerm) {
             currentTerm = response.getTerm();
-            votedFor = null;
             PersistentState.saveState(currentTerm, votedFor, logEntries);
             revertToFollower();
             return;
