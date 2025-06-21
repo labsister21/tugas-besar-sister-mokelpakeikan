@@ -1,17 +1,17 @@
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\App.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\Main.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\Log.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\LogEntry.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\NodeConnection.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\NodeType.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\RaftNode.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\ServerInfo.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\RaftServer.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\AppendEntriesMessage.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\AppendEntriesResponse.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\CommandVote.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\HeartbeatMessage.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\RpcMessage.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\RpcResponse.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\VoteMessage.java
-C:\Users\Auralea A S\Documents\SEMESTER 6\SISTER\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\storage\PersistentState.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\ServerInfo.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\CommandVote.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\NodeType.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\HeartbeatMessage.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\Log.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\VoteMessage.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\RaftNode.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\Main.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\NodeConnection.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\node\LogEntry.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\AppendEntriesMessage.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\RaftServer.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\storage\PersistentState.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\RpcMessage.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\AppendEntriesResponse.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\rpc\RpcResponse.java
+C:\Users\Shabrina Maharani\Documents\6th sem\Sistem Paralel dan Terdistribusi\Tubes\Tubes\tugas-besar-sister-mokelpakeikan\raft\src\main\java\com\raft\App.java
