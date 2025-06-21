@@ -239,12 +239,32 @@ public class RaftNode {
     private void handleHeartbeat(String message) {
         try {
             HeartbeatMessage heartbeat = gson.fromJson(message, HeartbeatMessage.class);
+
+            // Update leader information in clusterMembers
+            String[] leaderIdParts = heartbeat.getLeaderId().split(":");
+            String leaderHost = leaderIdParts[0];
+            int leaderPort = Integer.parseInt(leaderIdParts[1]);
             
-            // Only print on even timestamps
-            if (lastHeartbeatReceived % 2 == 0) {
-                long now = System.currentTimeMillis();
-                System.out.println("Received heartbeat from leader: " + heartbeat.getLeaderId() + 
-                                 " (term: " + heartbeat.getTerm() + " heartbeat got on " + (now-this.lastHeartbeatReceived) + " , timestamp : "+now+")");
+            // Debug print to see what values we're getting
+            System.out.println("DEBUG: Heartbeat received from " + leaderHost + ":" + leaderPort);
+            
+            // Update leader status in clusterMembers - using both IP and port to match
+            boolean leaderFound = false;
+            for (ServerInfo server : clusterMembers) {
+                if (server.getPort() == leaderPort) {
+                    server.setType(NodeType.LEADER);
+                    System.out.println("DEBUG: Updated leader in clusterMembers: " + server.getHost() + ":" + server.getPort());
+                    leaderFound = true;
+                } else if (server.getType() == NodeType.LEADER) {
+                    server.setType(NodeType.FOLLOWER);
+                }
+            }
+            
+            // If no matching server was found by port, add this server to the clusterMembers
+            if (!leaderFound) {
+                System.out.println("DEBUG: Leader not found in clusterMembers, adding new entry");
+                ServerInfo leaderInfo = new ServerInfo(leaderHost, leaderPort, NodeType.LEADER);
+                clusterMembers.add(leaderInfo);
             }
             lastHeartbeatReceived = System.currentTimeMillis();
             
@@ -644,6 +664,16 @@ public class RaftNode {
                         .filter(s -> s.getType() == NodeType.LEADER)
                         .findFirst()
                         .orElse(null);
+
+                    // Untuk debug leader info
+                    System.out.println("DEBUG: Looking for leader, found: " + (leader != null ? 
+                        (leader.getHost() + ":" + leader.getPort() + " type=" + leader.getType()) : "null"));
+
+                    
+                    System.out.println("DEBUG: Current cluster members:");
+                    for (ServerInfo member : clusterMembers) {
+                        System.out.println("  - " + member.getHost() + ":" + member.getPort() + " (" + member.getType() + ")");
+                    }
 
                     if (leader != null) {
                         response = new RpcResponse(rpcMessage.getId(), 
@@ -1435,6 +1465,9 @@ public class RaftNode {
         }
     }
 
+    // utk verif klo mayoritas server di konfig udh setuju perubahan konfigurasi
+    // bersihin status perubahan konfig
+    // proses perubahan konfigurasi selesai
     private void scheduleConfigChangeCheck() {
         heartbeatExecutor.schedule(() -> {
             // Check if we have majority acceptance for config change
