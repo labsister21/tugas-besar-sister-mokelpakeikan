@@ -765,25 +765,29 @@ public class RaftNode {
                             ", executing command");
                         vote.executed = true;
                         
-                        // Add log entry first with correct index
+                        // Calculate the correct log index for the new entry
                         long newLogIndex = lastLogIndex + 1;
+                        
+                        // Add new entry with the correct index
                         LogEntry newEntry = new LogEntry(
                             message.getMethod(),
                             message.getId(),
-                            newLogIndex,
+                            newLogIndex,  // Use the calculated newLogIndex
                             currentTerm,
                             (Map<String, Object>) message.getParams()
                         );
                         logEntries.add(newEntry);
                         
-                        // Update log index before executing command
+                        // Update our log index
                         lastLogIndex = newLogIndex;
                         lastLogTerm = currentTerm;
-                        System.out.println("Added log entry with index: " + newLogIndex + 
-                            ", updated lastLogIndex to: " + lastLogIndex);
                         
-                        // Execute command after adding to log
-                        RpcResponse response = executeCommand(message);
+                        System.out.println("Added new log entry: index=" + newEntry.getLogIndex() + 
+                            ", term=" + newEntry.getTerm() + ", method=" + newEntry.getMethod());
+                        System.out.println("Updated lastLogIndex to: " + lastLogIndex);
+                        
+                        // Execute the command
+                        RpcResponse rpcResponse = executeCommand(message);
                         
                         // Save state after adding new log entry
                         PersistentState.saveState(currentTerm, votedFor, logEntries);
@@ -795,7 +799,7 @@ public class RaftNode {
                             if (vote.replicatedNodes.size() >= activeNodes - 1) { // All followers have replicated
                                 System.out.println("All followers have replicated command " + message.getId());
                                 vote.committed = true;
-                                return response;
+                                return rpcResponse;
                             }
                             try {
                                 Thread.sleep(100);
@@ -808,7 +812,7 @@ public class RaftNode {
                         // If we got here, some followers didn't replicate in time
                         System.out.println("Warning: Not all followers replicated command " + message.getId() + 
                             " (replicated by " + vote.replicatedNodes.size() + " of " + (activeNodes - 1) + " followers)");
-                        return response;
+                        return rpcResponse;
                     }
                 }
                 try {
@@ -1070,7 +1074,6 @@ public class RaftNode {
                     revertToFollower();
                 }
                 
-               
                 if (message.getPrevLogIndex() == 0) {
                     // Always accept when prevLogIndex = 0 (empty log or starting from beginning)
                     success = true;
@@ -1107,30 +1110,24 @@ public class RaftNode {
                     }
                 }
                 
-            
                 if (success && message.getCommand() != null) {
                     System.out.println("Processing command: " + message.getCommand().getId());
                     
-                    // Truncate log if needed - remove all entries from prevLogIndex onwards
-                    // if (message.getPrevLogIndex() < logEntries.size()) {
-                    //     int entriesToRemove = logEntries.size() - (int)message.getPrevLogIndex();
-                    //     logEntries.subList((int)message.getPrevLogIndex(), logEntries.size()).clear();
-                    //     System.out.println("Truncated " + entriesToRemove + " log entries from index " + 
-                    //         message.getPrevLogIndex() + " onwards due to term conflict");
-                    // }
+                    // Calculate the correct log index for the new entry
+                    long newLogIndex = lastLogIndex + 1;
                     
-                    // Add new entry
+                    // Add new entry with the correct index
                     LogEntry newEntry = new LogEntry(
                         message.getCommand().getMethod(),
                         message.getCommand().getId(),
-                        message.getPrevLogIndex() + 1,
+                        newLogIndex,  // Use the calculated newLogIndex
                         currentTerm,
                         (Map<String, Object>) message.getCommand().getParams()
                     );
                     logEntries.add(newEntry);
                     
                     // Update our log index
-                    lastLogIndex = message.getPrevLogIndex() + 1;
+                    lastLogIndex = newLogIndex;
                     lastLogTerm = currentTerm;
                     
                     System.out.println("Added new log entry: index=" + newEntry.getLogIndex() + 
@@ -1773,7 +1770,7 @@ public class RaftNode {
             AppendEntriesMessage appendEntries = new AppendEntriesMessage(
                 address.getHostAddress() + ":" + port,
                 currentTerm,
-                null, // No command, just heartbeat
+                null, // No command for heartbeat
                 prevLogIndex,
                 prevLogTerm
             );
