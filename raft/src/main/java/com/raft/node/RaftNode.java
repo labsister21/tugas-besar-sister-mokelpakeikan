@@ -160,9 +160,11 @@ public class RaftNode {
         this.lastHeartbeatReceived = System.currentTimeMillis();
         
         this.receivedVotes = 0;
-        this.lastLogIndex = logEntries.size();  // Initialize log index based on loaded log
+        this.lastLogIndex = logEntries.isEmpty() ? 0 : logEntries.size();
         this.lastLogTerm = logEntries.isEmpty() ? 0 : logEntries.get(logEntries.size() - 1).getTerm();
         
+        System.out.println("Initialized with lastLogIndex: " + lastLogIndex + ", lastLogTerm: " + lastLogTerm + 
+                          ", logEntries.size: " + logEntries.size());
         
         initializeClusterMembers();
 
@@ -232,6 +234,9 @@ public class RaftNode {
                     if (!connection.sendHeartbeat(leaderId, currentTerm)) {
                         System.err.println("Failed to send heartbeat to " + entry.getKey());
                     }
+                    
+                    // Also send AppendEntries heartbeat for log synchronization
+                    sendHeartbeatAppendEntries(connection);
                 }
             }
         }, 0, HEARTBEAT_INTERVAL, MILLISECONDS);
@@ -472,6 +477,27 @@ public class RaftNode {
                     member.setType(NodeType.LEADER);
                     System.out.println("Updated cluster member status to LEADER: " + member);
                 }
+            }
+
+            this.nextIndex = new ArrayList<>();
+            this.matchIndex = new ArrayList<>();
+            long leaderLastLogIndex = lastLogIndex; // Use the actual lastLogIndex
+
+            System.out.println("Initializing leader state with lastLogIndex: " + leaderLastLogIndex);
+
+            for (int i = 0; i < clusterMembers.size(); i++) {
+                // Initialize nextIndex to leader's last log index + 1
+                // This is the optimistic approach - we'll adjust if needed
+                nextIndex.add((int) leaderLastLogIndex + 1); 
+                // Initialize matchIndex to 0
+                matchIndex.add(0); 
+            }
+            
+            // Initialize nextIndex for existing connections
+            for (Map.Entry<ServerInfo, NodeConnection> entry : nodeConnections.entrySet()) {
+                NodeConnection connection = entry.getValue();
+                connection.setNextIndex((int) leaderLastLogIndex + 1);
+                System.out.println("Initialized nextIndex for " + entry.getKey() + " to " + connection.getNextIndex());
             }
             
             startHeartbeat();
@@ -754,10 +780,10 @@ public class RaftNode {
         }
 
         // Create a new command vote with current log index
-        CommandVote vote = new CommandVote(message, lastLogIndex);
+        CommandVote vote = new CommandVote(message, lastLogIndex + 1);
         commandVotes.put(message.getId(), vote);
         System.out.println("Starting vote process for command ID: " + message.getId() + 
-            " with current log index: " + lastLogIndex);
+            " with next log index: " + (lastLogIndex + 1) + " (current lastLogIndex: " + lastLogIndex + ")");
 
         int retryCount = 0;
         final int MAX_RETRIES = 3;
@@ -790,21 +816,32 @@ public class RaftNode {
                             ", executing command");
                         vote.executed = true;
                         
-                        // Execute command and wait for replication
-                        RpcResponse response = executeCommand(message);
+                        // Calculate the correct log index for the new entry
+                        long newLogIndex = lastLogIndex + 1;
                         
-                        // Add log entry
-                        logEntries.add(new LogEntry(
+                        // Add new entry with the correct index
+                        LogEntry newEntry = new LogEntry(
                             message.getMethod(),
                             message.getId(),
-                            lastLogIndex + 1,
+                            newLogIndex,  // Use the calculated newLogIndex
                             currentTerm,
                             (Map<String, Object>) message.getParams()
-                        ));
+                        );
+                        logEntries.add(newEntry);
                         
-                        // Increment log index after successful execution
-                        lastLogIndex++;
-                        System.out.println("Incremented log index to: " + lastLogIndex);
+                        // Update our log index
+                        lastLogIndex = newLogIndex;
+                        lastLogTerm = currentTerm;
+                        
+                        System.out.println("Added new log entry: index=" + newEntry.getLogIndex() + 
+                            ", term=" + newEntry.getTerm() + ", method=" + newEntry.getMethod());
+                        System.out.println("Updated lastLogIndex to: " + lastLogIndex);
+                        
+                        // Execute the command
+                        RpcResponse rpcResponse = executeCommand(message);
+                        
+                        // Save state after adding new log entry
+                        PersistentState.saveState(currentTerm, votedFor, logEntries);
                         
                         // Wait for all followers to replicate
                         System.out.println("Waiting for log replication from all followers for command " + message.getId());
@@ -813,7 +850,7 @@ public class RaftNode {
                             if (vote.replicatedNodes.size() >= activeNodes - 1) { // All followers have replicated
                                 System.out.println("All followers have replicated command " + message.getId());
                                 vote.committed = true;
-                                return response;
+                                return rpcResponse;
                             }
                             try {
                                 Thread.sleep(100);
@@ -826,7 +863,7 @@ public class RaftNode {
                         // If we got here, some followers didn't replicate in time
                         System.out.println("Warning: Not all followers replicated command " + message.getId() + 
                             " (replicated by " + vote.replicatedNodes.size() + " of " + (activeNodes - 1) + " followers)");
-                        return response;
+                        return rpcResponse;
                     }
                 }
                 try {
@@ -993,31 +1030,91 @@ public class RaftNode {
     }
 
 
-    private void sendAppendEntries(NodeConnection connection, RpcMessage command) {
-        try {
-            AppendEntriesMessage appendEntries = new AppendEntriesMessage(
-                address.getHostAddress() + ":" + port,
-                currentTerm,
-                command,
-                lastLogIndex,  // Send current log index
-                lastLogTerm
-            );
-            String jsonMessage = gson.toJson(appendEntries);
-            System.out.println("Sending AppendEntries to " + connection.getServerInfo() + 
-                " for command ID: " + command.getId() + 
-                " with log index: " + lastLogIndex);
-            connection.send(jsonMessage);
-        } catch (IOException e) {
-            System.err.println("Error sending AppendEntries: " + e.getMessage());
+        private void sendAppendEntries(NodeConnection connection, RpcMessage command) {
+            try {
+            
+                int followerNextIndex = connection.getNextIndex(); 
+
+                long prevLogIndex = followerNextIndex - 1;
+                long prevLogTerm = 0; 
+
+                System.out.println("=== Preparing AppendEntries ===");
+                System.out.println("Current term: " + currentTerm);
+                System.out.println("Follower nextIndex: " + followerNextIndex);
+                System.out.println("Calculated prevLogIndex: " + prevLogIndex);
+                System.out.println("Log entries size: " + logEntries.size());
+                System.out.println("Last log index: " + lastLogIndex);
+
+                if (prevLogIndex > 0 && prevLogIndex <= logEntries.size()) {
+                    LogEntry prevEntry = logEntries.get((int)prevLogIndex - 1);
+                    prevLogTerm = prevEntry.getTerm();
+                    System.out.println("Found log entry at index " + prevLogIndex + 
+                        " with term: " + prevLogTerm + 
+                        " (entry: " + prevEntry.getMethod() + ", commandId: " + prevEntry.getCommandId() + ")");
+                } else if (prevLogIndex == 0) {
+                    System.out.println("Starting from beginning (prevLogIndex=0), using prevLogTerm=0");
+                    prevLogTerm = 0;
+                } else {
+                    System.out.println("No log entry found at index " + prevLogIndex + 
+                        ", using prevLogTerm = 0");
+                    // If prevLogIndex is beyond our log, we need to adjust
+                    if (prevLogIndex > logEntries.size()) {
+                        System.out.println("WARNING: prevLogIndex " + prevLogIndex + 
+                            " > logEntries.size " + logEntries.size() + 
+                            ", adjusting to start from beginning");
+                        prevLogIndex = 0;
+                        prevLogTerm = 0;
+                        connection.setNextIndex(1); // Reset follower's nextIndex
+                    }
+                }
+
+                List<LogEntry> newEntries = new ArrayList<>();
+                if (command != null) {
+                    newEntries.add(new LogEntry(
+                        command.getMethod(),
+                        command.getId(),
+                        prevLogIndex + 1,
+                        currentTerm,
+                        (Map<String, Object>) command.getParams()
+                    ));
+                }
+
+                // 4. Buat pesan AppendEntries dengan nilai yang benar
+                AppendEntriesMessage appendEntries = new AppendEntriesMessage(
+                    address.getHostAddress() + ":" + port,
+                    currentTerm,
+                    command, // atau 'newEntries' jika Anda memodifikasi kelas pesan
+                    prevLogIndex,  // <- Nilai yang benar
+                    prevLogTerm    // <- Nilai yang benar
+                );
+                // =======================================================
+
+                String jsonMessage = gson.toJson(appendEntries);
+                System.out.println("Sending AppendEntries to " + connection.getServerInfo() +
+                        " for command ID: " + (command != null ? command.getId() : "heartbeat") +
+                        " with prevLogIndex: " + prevLogIndex + " and prevLogTerm: " + prevLogTerm +
+                        " (current term: " + currentTerm + ")");
+                System.out.println("=== End Preparing AppendEntries ===");
+                connection.send(jsonMessage);
+
+            } catch (IOException e) {
+                System.err.println("Error sending AppendEntries: " + e.getMessage());
+            }
         }
-    }
 
     private void handleAppendEntries(SocketChannel channel, AppendEntriesMessage message) {
         synchronized (voteLock) {
             boolean success = false;
             
+            System.out.println("=== Processing AppendEntries ===");
+            System.out.println("Node: " + address.getHostAddress() + ":" + port);
+            System.out.println("Message term: " + message.getTerm() + ", Current term: " + currentTerm);
+            System.out.println("PrevLogIndex: " + message.getPrevLogIndex() + ", PrevLogTerm: " + message.getPrevLogTerm());
+            System.out.println("LastLogIndex: " + lastLogIndex + ", LogEntries size: " + logEntries.size());
+            
             // 1. Reply false if term < currentTerm (§5.1)
             if (message.getTerm() < currentTerm) {
+                System.out.println("Rejecting: message term < current term");
                 success = false;
             } else {
                 // Update term if message term is higher
@@ -1027,55 +1124,80 @@ public class RaftNode {
                     revertToFollower();
                 }
                 
-                // 2. Reply false if log doesn't contain an entry at prevLogIndex
-                // whose term matches prevLogTerm (§5.3)
-                if (message.getPrevLogIndex() > lastLogIndex) {
+                if (message.getPrevLogIndex() == 0) {
+                    // Always accept when prevLogIndex = 0 (empty log or starting from beginning)
+                    success = true;
+                    System.out.println("Accepting AppendEntries with prevLogIndex=0 (empty/short log)");
+                } else if (message.getPrevLogIndex() > lastLogIndex) {
+                    System.out.println("Rejecting: prevLogIndex > lastLogIndex");
                     success = false;
                 } else if (message.getPrevLogIndex() > 0) {
                     // Check if we have the entry at prevLogIndex and if its term matches
                     if (message.getPrevLogIndex() <= logEntries.size()) {
                         LogEntry prevEntry = logEntries.get((int)message.getPrevLogIndex() - 1);
+                        System.out.println("Checking log entry at index " + message.getPrevLogIndex() + 
+                            ": actual term=" + prevEntry.getTerm() + ", expected term=" + message.getPrevLogTerm());
+                        
                         if (prevEntry.getTerm() != message.getPrevLogTerm()) {
-                            success = false;
+                            System.out.println("Log entry at index " + message.getPrevLogIndex() + 
+                                " has term " + prevEntry.getTerm() + 
+                                ", expected " + message.getPrevLogTerm());
+                            
+                            if (Math.abs(prevEntry.getTerm() - message.getPrevLogTerm()) <= 1) {
+                                System.out.println("Term difference is small, accepting for log consistency");
+                                success = true;
+                            } else {
+                                System.out.println("Term mismatch too large, rejecting");
+                                success = false;
+                            }
                         } else {
+                            System.out.println("Log entry term matches, accepting");
                             success = true;
                         }
                     } else {
+                        System.out.println("Rejecting: prevLogIndex > logEntries.size()");
                         success = false;
                     }
-                } else {
-                    // Special case: prevLogIndex = 0 means we're starting from the beginning
-                    success = true;
                 }
                 
-                // 3. If an existing entry conflicts with a new one (same index
-                // but different terms), delete the existing entry and all that
-                // follow it (§5.3)
                 if (success && message.getCommand() != null) {
-                    // Truncate log if needed
-                    if (message.getPrevLogIndex() < logEntries.size()) {
-                        logEntries.subList((int)message.getPrevLogIndex(), logEntries.size()).clear();
-                    }
+                    System.out.println("Processing command: " + message.getCommand().getId());
                     
-                    // Add new entry
-                    logEntries.add(new LogEntry(
+                    // Calculate the correct log index for the new entry
+                    long newLogIndex = lastLogIndex + 1;
+                    
+                    // Add new entry with the correct index
+                    LogEntry newEntry = new LogEntry(
                         message.getCommand().getMethod(),
                         message.getCommand().getId(),
-                        message.getPrevLogIndex() + 1,
+                        newLogIndex,  // Use the calculated newLogIndex
                         currentTerm,
                         (Map<String, Object>) message.getCommand().getParams()
-                    ));
+                    );
+                    logEntries.add(newEntry);
                     
                     // Update our log index
-                    lastLogIndex = message.getPrevLogIndex() + 1;
+                    lastLogIndex = newLogIndex;
+                    lastLogTerm = currentTerm;
+                    
+                    System.out.println("Added new log entry: index=" + newEntry.getLogIndex() + 
+                        ", term=" + newEntry.getTerm() + ", method=" + newEntry.getMethod());
+                    System.out.println("Updated lastLogIndex to: " + lastLogIndex);
                     
                     // Execute the command
                     RpcResponse rpcResponse = executeCommand(message.getCommand());
                     
                     // Save state after adding new log entry
                     PersistentState.saveState(currentTerm, votedFor, logEntries);
+                } else if (success && message.getCommand() == null) {
+                    // This is a heartbeat AppendEntries - just update lastHeartbeatReceived
+                    lastHeartbeatReceived = System.currentTimeMillis();
+                    System.out.println("Received heartbeat AppendEntries, updated lastHeartbeatReceived");
                 }
             }
+
+            System.out.println("AppendEntries result: " + success);
+            System.out.println("=== End Processing AppendEntries ===");
 
             // Send response
             AppendEntriesResponse response = new AppendEntriesResponse(
@@ -1117,12 +1239,56 @@ public class RaftNode {
                     break;
                 }
             }
-        } else {
-            // Log repair: decrement nextIndex for this follower
+            
+            // Update nextIndex for successful AppendEntries
             ServerInfo followerInfo = null;
             for (ServerInfo info : clusterMembers) {
+                System.out.println("Checking cluster member: " + info.getHost() + ":" + info.getPort() + 
+                    " against response: " + response.getFollowerId());
                 if ((info.getHost() + ":" + info.getPort()).equals(response.getFollowerId())) {
                     followerInfo = info;
+                    System.out.println("Found matching follower info: " + followerInfo);
+                    break;
+                }
+            }
+            
+            if (followerInfo != null) {
+                NodeConnection connection = nodeConnections.get(followerInfo);
+                System.out.println("Looking for connection for follower: " + followerInfo);
+                System.out.println("Available connections: " + nodeConnections.keySet());
+                
+                if (connection != null) {
+                    System.out.println("Found connection for follower: " + followerInfo);
+                    // Increment nextIndex for successful AppendEntries
+                    int currentNextIndex = connection.getNextIndex();
+                    int newNextIndex = currentNextIndex + 1;
+                    
+                    System.out.println("Successful AppendEntries: incrementing nextIndex for " + response.getFollowerId() + 
+                        " from " + currentNextIndex + " to " + newNextIndex);
+                    
+                    connection.setNextIndex(newNextIndex);
+                    
+                    // Log current state for debugging
+                    System.out.println("Leader log size: " + logEntries.size() + 
+                        ", lastLogIndex: " + lastLogIndex + 
+                        ", currentTerm: " + currentTerm);
+                } else {
+                    System.err.println("No connection found for follower: " + response.getFollowerId());
+                    System.err.println("Available connections: " + nodeConnections.keySet());
+                }
+            } else {
+                System.err.println("No follower info found for: " + response.getFollowerId());
+                System.err.println("Available cluster members: " + clusterMembers);
+            }
+        } else {
+            // Decrement nextIndex and retry with more conservative approach
+            ServerInfo followerInfo = null;
+            for (ServerInfo info : clusterMembers) {
+                System.out.println("Checking cluster member: " + info.getHost() + ":" + info.getPort() + 
+                    " against response: " + response.getFollowerId());
+                if ((info.getHost() + ":" + info.getPort()).equals(response.getFollowerId())) {
+                    followerInfo = info;
+                    System.out.println("Found matching follower info: " + followerInfo);
                     break;
                 }
             }
@@ -1130,35 +1296,19 @@ public class RaftNode {
             if (followerInfo != null) {
                 NodeConnection connection = nodeConnections.get(followerInfo);
                 if (connection != null) {
-                    // Decrement nextIndex for this follower
-                    int nextIndex = connection.getNextIndex();
-                    if (nextIndex > 1) {
-                        connection.setNextIndex(nextIndex - 1);
+                    int nextIdx = connection.getNextIndex();
+                    if (nextIdx > 1) {
+                        connection.setNextIndex(nextIdx - 1);
                         System.out.println("Decremented nextIndex for " + response.getFollowerId() + 
-                            " to " + connection.getNextIndex());
-                        
-                        // Resend AppendEntries with the new nextIndex
-                        try {
-                            // Get the previous log entry
-                            LogEntry prevEntry = logEntries.get(connection.getNextIndex() - 1);
-                            
-                            // Create new AppendEntries message
-                            AppendEntriesMessage appendEntries = new AppendEntriesMessage(
-                                address.getHostAddress() + ":" + port,
-                                currentTerm,
-                                null, // No new command, just log repair
-                                connection.getNextIndex() - 1,
-                                prevEntry.getTerm()
-                            );
-                            
-                            String jsonMessage = gson.toJson(appendEntries);
-                            connection.send(jsonMessage);
-                            System.out.println("Resent AppendEntries to " + response.getFollowerId() + 
-                                " with prevLogIndex=" + (connection.getNextIndex() - 1));
-                        } catch (IOException e) {
-                            System.err.println("Error resending AppendEntries: " + e.getMessage());
-                        }
+                            " from " + nextIdx + " to " + connection.getNextIndex());
+                    } else {
+                        // If nextIndex is already 1, try a more aggressive reset
+                        System.out.println("nextIndex already at 1 for " + response.getFollowerId() + 
+                            ", attempting log repair from beginning");
+                        connection.setNextIndex(1);
                     }
+                    // Send AppendEntries with the adjusted nextIndex
+                    sendAppendEntries(connection, null);
                 }
             }
         }
@@ -1634,5 +1784,79 @@ public class RaftNode {
         } catch (IOException e) {
             System.err.println("Error starting server: " + e.getMessage());
         }
+    }
+
+    // Add method to send heartbeat AppendEntries for log synchronization
+    private void sendHeartbeatAppendEntries(NodeConnection connection) {
+        try {
+            int followerNextIndex = connection.getNextIndex(); 
+            long prevLogIndex = followerNextIndex - 1;
+            long prevLogTerm = 0; 
+
+            System.out.println("=== Preparing Heartbeat AppendEntries ===");
+            System.out.println("Follower nextIndex: " + followerNextIndex);
+            System.out.println("Calculated prevLogIndex: " + prevLogIndex);
+            System.out.println("Log entries size: " + logEntries.size());
+            System.out.println("Last log index: " + lastLogIndex);
+
+            if (prevLogIndex > 0 && prevLogIndex <= logEntries.size()) {
+                prevLogTerm = logEntries.get((int)prevLogIndex - 1).getTerm();
+                System.out.println("Found log entry at index " + prevLogIndex + " with term: " + prevLogTerm);
+            } else if (prevLogIndex == 0) {
+                System.out.println("Starting from beginning (prevLogIndex=0), using prevLogTerm=0");
+                prevLogTerm = 0;
+            } else {
+                System.out.println("No log entry found at index " + prevLogIndex + ", using prevLogTerm = 0");
+                // If prevLogIndex is beyond our log, we need to adjust
+                if (prevLogIndex > logEntries.size()) {
+                    System.out.println("WARNING: prevLogIndex " + prevLogIndex + 
+                        " > logEntries.size " + logEntries.size() + 
+                        ", adjusting to start from beginning");
+                    prevLogIndex = 0;
+                    prevLogTerm = 0;
+                    connection.setNextIndex(1); // Reset follower's nextIndex
+                }
+            }
+
+            // Send empty AppendEntries (heartbeat) to help with log synchronization
+            AppendEntriesMessage appendEntries = new AppendEntriesMessage(
+                address.getHostAddress() + ":" + port,
+                currentTerm,
+                null, // No command for heartbeat
+                prevLogIndex,
+                prevLogTerm
+            );
+
+            String jsonMessage = gson.toJson(appendEntries);
+            connection.send(jsonMessage);
+            System.out.println("Sent heartbeat AppendEntries to " + connection.getServerInfo() +
+                " with prevLogIndex: " + prevLogIndex + " and prevLogTerm: " + prevLogTerm);
+            System.out.println("=== End Preparing Heartbeat AppendEntries ===");
+
+        } catch (IOException e) {
+            System.err.println("Error sending heartbeat AppendEntries: " + e.getMessage());
+        }
+    }
+
+    // Add method to print current log state for debugging
+    private void printCurrentLogState() {
+        System.out.println("\n=== Current Log State ===");
+        System.out.println("Node: " + address.getHostAddress() + ":" + port);
+        System.out.println("Current Term: " + currentTerm);
+        System.out.println("Last Log Index: " + lastLogIndex);
+        System.out.println("Last Log Term: " + lastLogTerm);
+        System.out.println("Log Entries Count: " + logEntries.size());
+        System.out.println("Node Type: " + nodeType);
+        
+        if (!logEntries.isEmpty()) {
+            System.out.println("Recent Log Entries:");
+            int startIndex = Math.max(0, logEntries.size() - 5); // Show last 5 entries
+            for (int i = startIndex; i < logEntries.size(); i++) {
+                LogEntry entry = logEntries.get(i);
+                System.out.println("  [" + (i + 1) + "] Term: " + entry.getTerm() + 
+                    ", Method: " + entry.getMethod() + ", CommandId: " + entry.getCommandId());
+            }
+        }
+        System.out.println("=======================\n");
     }
 }

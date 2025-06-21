@@ -1,5 +1,9 @@
 package com.raft.rpc;
 
+import java.io.Serial;
+import java.util.List;
+import com.raft.node.LogEntry;
+
 import com.google.gson.annotations.SerializedName;
 
 public class AppendEntriesMessage {
