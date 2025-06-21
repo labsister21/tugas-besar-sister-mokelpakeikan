@@ -84,6 +84,7 @@ public class RaftNode {
     private List<ServerInfo> newConfig;
     private boolean isJointConsensus = false;
     private long configChangeIndex = -1;
+    private boolean heartbeatActive = false;
     private final Map<String, Boolean> configVotes = new ConcurrentHashMap<>();
 
     // Constants
@@ -230,10 +231,10 @@ public class RaftNode {
                 
                 // Send heartbeat if connected
                 if (connection.isConnected()) {
-                    String leaderId = address.getHostAddress() + ":" + port;
-                    if (!connection.sendHeartbeat(leaderId, currentTerm)) {
-                        System.err.println("Failed to send heartbeat to " + entry.getKey());
-                    }
+                    // String leaderId = address.getHostAddress() + ":" + port;
+                    // if (!connection.sendHeartbeat(leaderId, currentTerm)) {
+                    //     System.err.println("Failed to send heartbeat to " + entry.getKey());
+                    // }
                     
                     // Also send AppendEntries heartbeat for log synchronization
                     sendHeartbeatAppendEntries(connection);
@@ -246,32 +247,10 @@ public class RaftNode {
         try {
             HeartbeatMessage heartbeat = gson.fromJson(message, HeartbeatMessage.class);
 
-            // Update leader information in clusterMembers
-            String[] leaderIdParts = heartbeat.getLeaderId().split(":");
-            String leaderHost = leaderIdParts[0];
-            int leaderPort = Integer.parseInt(leaderIdParts[1]);
+            // Update leader information in clusterMembers using syncLeaderStatus
+            syncLeaderStatus(heartbeat.getLeaderId());
             
-            // Debug print to see what values we're getting
-            System.out.println("DEBUG: Heartbeat received from " + leaderHost + ":" + leaderPort);
-            
-            // Update leader status in clusterMembers - using both IP and port to match
-            boolean leaderFound = false;
-            for (ServerInfo server : clusterMembers) {
-                if (server.getPort() == leaderPort) {
-                    server.setType(NodeType.LEADER);
-                    System.out.println("DEBUG: Updated leader in clusterMembers: " + server.getHost() + ":" + server.getPort());
-                    leaderFound = true;
-                } else if (server.getType() == NodeType.LEADER) {
-                    server.setType(NodeType.FOLLOWER);
-                }
-            }
-            
-            // If no matching server was found by port, add this server to the clusterMembers
-            if (!leaderFound) {
-                System.out.println("DEBUG: Leader not found in clusterMembers, adding new entry");
-                ServerInfo leaderInfo = new ServerInfo(leaderHost, leaderPort, NodeType.LEADER);
-                clusterMembers.add(leaderInfo);
-            }
+            System.out.println("DEBUG: Heartbeat received from " + heartbeat.getLeaderId());
             lastHeartbeatReceived = System.currentTimeMillis();
             
             // Update term if necessary
@@ -280,7 +259,7 @@ public class RaftNode {
                 PersistentState.saveState(currentTerm, votedFor, logEntries);
                 if (nodeType == NodeType.CANDIDATE) {
                     cancelCandidation();
-                }else{
+                } else if (nodeType == NodeType.LEADER) {
                     revertToFollower();
                 }
             }
@@ -471,14 +450,29 @@ public class RaftNode {
             nodeType = NodeType.LEADER;
             inElection = false;  // Reset election state
 
-            // Update the corresponding ServerInfo in clusterMembers
+            // Update all serverInfo entries - find self by port match
+            boolean foundSelf = false;
             for (ServerInfo member : clusterMembers) {
                 if (member.getPort() == this.port) {
                     member.setType(NodeType.LEADER);
-                    System.out.println("Updated cluster member status to LEADER: " + member);
+                    foundSelf = true;
+                    System.out.println("DEBUG: Updated self in clusterMembers to LEADER");
+                } else if (member.getType() == NodeType.LEADER) {
+                    member.setType(NodeType.FOLLOWER);
                 }
             }
 
+            if (!foundSelf) {
+                System.out.println("WARNING: Couldn't find self in clusterMembers when becoming leader!");
+            }
+
+            // Print current cluster state
+            System.out.println("DEBUG: Cluster members after becoming leader:");
+            for (ServerInfo member : clusterMembers) {
+                System.out.println("  - " + member.getHost() + ":" + member.getPort() + " (" + member.getType() + ")");
+            }
+
+            // Initialize leader state
             this.nextIndex = new ArrayList<>();
             this.matchIndex = new ArrayList<>();
             long leaderLastLogIndex = lastLogIndex; // Use the actual lastLogIndex
@@ -486,10 +480,7 @@ public class RaftNode {
             System.out.println("Initializing leader state with lastLogIndex: " + leaderLastLogIndex);
 
             for (int i = 0; i < clusterMembers.size(); i++) {
-                // Initialize nextIndex to leader's last log index + 1
-                // This is the optimistic approach - we'll adjust if needed
                 nextIndex.add((int) leaderLastLogIndex + 1); 
-                // Initialize matchIndex to 0
                 matchIndex.add(0); 
             }
             
@@ -509,6 +500,15 @@ public class RaftNode {
             nodeType = NodeType.FOLLOWER;
             votedFor = null;
             receivedVotes = 0;
+
+            // Update own status in clusterMembers
+            for (ServerInfo member : clusterMembers) {
+                if (member.getPort() == this.port && member.getHost().equals(this.address.getHostAddress())) {
+                    member.setType(NodeType.FOLLOWER);
+                    break;
+                }
+            }
+
             System.out.println("votedfor becomes null in reverttofollower");
         }
 
@@ -1105,6 +1105,9 @@ public class RaftNode {
     private void handleAppendEntries(SocketChannel channel, AppendEntriesMessage message) {
         synchronized (voteLock) {
             boolean success = false;
+
+            // Update Leader status
+            syncLeaderStatus(message.getLeaderId());
             
             System.out.println("=== Processing AppendEntries ===");
             System.out.println("Node: " + address.getHostAddress() + ":" + port);
@@ -1858,5 +1861,70 @@ public class RaftNode {
             }
         }
         System.out.println("=======================\n");
+    }
+
+    // Method to synchronize leader status
+    private void syncLeaderStatus(String leaderId) {
+        try {
+            // Parse the leaderId to get host and port
+            String[] parts = leaderId.split(":");
+            String leaderHost = parts[0];
+            int leaderPort = Integer.parseInt(parts[1]);
+            
+            String myId = address.getHostAddress() + ":" + port;
+            System.out.println("DEBUG: syncLeaderStatus called with leaderId: " + leaderId + ", my ID is: " + myId);
+            
+            boolean leaderFound = false;
+            boolean iAmTheLeader = port == leaderPort;
+            
+            // Reset leader status for all nodes - identify leader by PORT only
+            for (ServerInfo server : clusterMembers) {
+                if (server.getPort() == leaderPort) {
+                    // This is the leader, regardless of hostname/IP
+                    server.setType(NodeType.LEADER);
+                    leaderFound = true;
+                    System.out.println("DEBUG: Marked server " + server.getHost() + ":" + server.getPort() + " as LEADER");
+                } else if (server.getType() == NodeType.LEADER) {
+                    server.setType(NodeType.FOLLOWER);
+                    System.out.println("DEBUG: Reverted " + server.getHost() + ":" + server.getPort() + " from LEADER to FOLLOWER");
+                }
+            }
+            
+            // Update this node's status based on whether it's the leader
+            if (iAmTheLeader) {
+                if (nodeType != NodeType.LEADER) {
+                    System.out.println("DEBUG: This node is the leader but nodeType is " + nodeType + ", updating to LEADER");
+                    nodeType = NodeType.LEADER;
+                    // Only the actual leader should initiate heartbeats
+                    if (!heartbeatActive) {
+                        startHeartbeat();
+                    }
+                }
+            } else {
+                if (nodeType == NodeType.LEADER) {
+                    System.out.println("DEBUG: This node is not the leader but nodeType is LEADER, updating to FOLLOWER");
+                    nodeType = NodeType.FOLLOWER;
+                    // Stop sending heartbeats if we're not the leader
+                    stopHeartbeat();
+                }
+            }
+            
+            System.out.println("DEBUG: After syncLeaderStatus, leaderFound=" + leaderFound + ", iAmTheLeader=" + iAmTheLeader);
+            
+            // Print current cluster state after update
+            System.out.println("DEBUG: Current cluster members after update:");
+            for (ServerInfo member : clusterMembers) {
+                System.out.println("  - " + member.getHost() + ":" + member.getPort() + " (" + member.getType() + ")");
+            }
+        } catch (Exception e) {
+            System.err.println("Error in syncLeaderStatus: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    private void stopHeartbeat() {
+        heartbeatActive = false;
+        // You might need additional logic to actually stop the heartbeat
+        System.out.println("Stopped sending heartbeats as this node is no longer the leader");
     }
 }
