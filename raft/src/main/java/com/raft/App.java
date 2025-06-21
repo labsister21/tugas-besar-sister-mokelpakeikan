@@ -89,15 +89,43 @@ public class App {
                 Map<String, Object> leaderInfo = (Map<String, Object>) rpcResponse.getError().getData();
                 String newLeaderHost = (String) leaderInfo.get("leader_host");
                 int newLeaderPort = ((Number) leaderInfo.get("leader_port")).intValue();
+
+                // Check if auto_redirect flag is set
+                boolean autoRedirect = leaderInfo.containsKey("auto_redirect") && 
+                                    (boolean) leaderInfo.get("auto_redirect");
                 
                 // Update leader information
                 this.currentLeaderHost = newLeaderHost;
                 this.currentLeaderPort = newLeaderPort;
                 
-                return new RpcResponse(id, 
-                    new RpcResponse.RpcError(-32000, 
-                        String.format("Please reconnect to leader at %s:%d", newLeaderHost, newLeaderPort), 
-                        leaderInfo));
+                if (autoRedirect) {
+                    System.out.println("Not leader. Attempting automatic redirect to " + 
+                                    newLeaderHost + ":" + newLeaderPort);
+                    
+                    // Disconnect from current server
+                    disconnect();
+                    
+                    // Connect to the leader
+                    boolean connected = connect();
+                    
+                    if (connected) {
+                        System.out.println("Automatically redirected to leader at " + 
+                                        newLeaderHost + ":" + newLeaderPort);
+                        // Retry the original request with the new leader
+                        return sendRequest(method, params);
+                    } else {
+                        return new RpcResponse(id, 
+                            new RpcResponse.RpcError(-32002, 
+                            "Failed to connect to leader at " + 
+                            newLeaderHost + ":" + newLeaderPort, null));
+                    }
+                } else {
+                    // No auto-redirect, just return the error
+                    return new RpcResponse(id, 
+                        new RpcResponse.RpcError(-32000, 
+                            String.format("Please reconnect to leader at %s:%d", newLeaderHost, newLeaderPort), 
+                            leaderInfo));
+                }
             }
             
             return rpcResponse;

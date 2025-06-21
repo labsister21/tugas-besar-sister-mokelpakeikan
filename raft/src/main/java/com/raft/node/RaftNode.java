@@ -678,9 +678,19 @@ public class RaftNode {
                     if (leader != null) {
                         response = new RpcResponse(rpcMessage.getId(), 
                             new RpcResponse.RpcError(-32000, 
-                                "Not leader. Please connect to leader.", 
+                                "Not leader. Please reconnect to leader.", 
                                 Map.of("leader_host", leader.getHost(), 
-                                      "leader_port", leader.getPort())));
+                                    "leader_port", leader.getPort(),
+                                    "auto_redirect", true)));
+                        
+                        // Send response
+                        sendResponse(clientChannel, response);
+                        
+                        // After sending redirect response, close the connection
+                        System.out.println("Closing client connection and redirecting to leader: " + 
+                                        leader.getHost() + ":" + leader.getPort());
+                        closeConnection(clientChannel);
+                        return;
                     } else {
                         response = new RpcResponse(rpcMessage.getId(),
                             new RpcResponse.RpcError(-32001, "Leader not found", null));
