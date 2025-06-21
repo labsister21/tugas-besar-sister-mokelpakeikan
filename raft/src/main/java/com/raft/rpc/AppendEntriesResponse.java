@@ -15,10 +15,14 @@ public class AppendEntriesResponse {
     @SerializedName("followerId")
     public final String followerId;
 
-    public AppendEntriesResponse(long term, boolean success, String followerId) {
+    @SerializedName("matchIndex")
+    public final long matchIndex;
+
+    public AppendEntriesResponse(long term, boolean success, String followerId, long matchIndex) {
         this.term = term;
         this.success = success;
         this.followerId = followerId;
+        this.matchIndex = matchIndex;
     }
 
     public String getType() {
@@ -35,5 +39,9 @@ public class AppendEntriesResponse {
 
     public String getFollowerId() {
         return followerId;
+    }
+    
+    public long getMatchIndex() {
+        return matchIndex;
     }
 }

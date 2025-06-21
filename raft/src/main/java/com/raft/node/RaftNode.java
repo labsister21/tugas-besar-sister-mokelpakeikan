@@ -31,6 +31,7 @@ import com.raft.rpc.AppendEntriesResponse;
 import com.raft.rpc.CommandVote;
 import com.raft.storage.PersistentState;
 import com.raft.storage.PersistentState.State;
+import com.sun.tools.jconsole.JConsoleContext;
 // import com.raft.node.LogEntry;
 
 public class RaftNode {
@@ -44,8 +45,8 @@ public class RaftNode {
     private int lastApplied = 0;
 
     // Volatile State (Leader)
-    private List<Integer> nextIndex = null;
-    private List<Integer> matchIndex = null;
+    private Map<NodeConnection, Long> nextIndexMap = null;
+    private Map<NodeConnection, Long> matchIndexMap = new ConcurrentHashMap<>();
 
 
     // Connections
@@ -59,7 +60,7 @@ public class RaftNode {
     // Timeouts / Intervals
     private final int VOTE_TIMEOUT = 5000; // 5 seconds timeout for votes
     private final float heartbeatTimeout;
-    private static final long HEARTBEAT_INTERVAL = 5000; // 2 seconds
+    private static final long HEARTBEAT_INTERVAL = 10000; // 2 seconds
 
 
     // Service
@@ -91,6 +92,7 @@ public class RaftNode {
     private static final Random random = new Random();
     private final Gson gson;
     private final Object voteLock = new Object();
+    private final Object logLock = new Object();
     private final Map<String, CommandVote> commandVotes = new ConcurrentHashMap<>();
     private Selector selector;
 
@@ -144,6 +146,8 @@ public class RaftNode {
         this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor();
         this.clusterMembers = new ArrayList<>();
         this.nodeConnections = new ConcurrentHashMap<>();
+        this.nextIndexMap = new ConcurrentHashMap<>();
+        this.matchIndexMap = new ConcurrentHashMap<>();
         this.gson = new Gson();
 
         this.currentConfig = new ArrayList<>(clusterMembers);
@@ -156,8 +160,7 @@ public class RaftNode {
         this.votedFor = state.getVotedFor();
         this.logEntries.addAll(state.getLog());
         
-        // Initialize random heartbeat timeout between 5000-7000 milliseconds
-        this.heartbeatTimeout = 6000 + random.nextFloat() * 4000;
+        this.heartbeatTimeout = 10000 + random.nextFloat() * 5000;
         this.lastHeartbeatReceived = System.currentTimeMillis();
         
         this.receivedVotes = 0;
@@ -175,7 +178,8 @@ public class RaftNode {
 
         for (ServerInfo member : clusterMembers) {
             if (member.getPort() != this.port) {
-                this.nodeConnections.put(member, new NodeConnection(member));
+                NodeConnection newConnection = new NodeConnection(member);
+                this.nodeConnections.put(member, newConnection);
             }
             System.out.println("Cluster member: " + member.getHost() + ":" + member.getPort());
         }
@@ -200,10 +204,12 @@ public class RaftNode {
             if (nodeType != NodeType.FOLLOWER) {
                 return;  // Leader tidak perlu mengecek timeout
             }
+
+
             
             long now = System.currentTimeMillis();
             if (now - lastHeartbeatReceived > heartbeatTimeout && !inElection) {
-                System.out.println("No heartbeat received for " + (now - lastHeartbeatReceived) + " ms. Starting election!");
+                System.out.println("No heartbeat received as a "+ nodeType + "for " + (now - lastHeartbeatReceived) + " ms. Starting election!");
                 lastHeartbeatReceived = now;
                 startElection();
             }
@@ -348,10 +354,10 @@ public class RaftNode {
             clientBuffers.putIfAbsent(channel, ByteBuffer.allocate(1024));
             if (key == null || !key.isValid()) {
                 key = channel.register(selector, SelectionKey.OP_READ);
-                System.out.println("Registered new channel for reading vote responses");
+                // System.out.println("Registered new channel for reading vote responses");
             } else {
                 key.interestOps(SelectionKey.OP_READ);
-                System.out.println("Updated existing channel for reading vote responses");
+                // System.out.println("Updated existing channel for reading vote responses");
             }
             selector.wakeup();
         } catch (Exception e) {
@@ -390,13 +396,13 @@ public class RaftNode {
         );
 
         long now = System.currentTimeMillis();
-        System.out.println("created vote response for " + request.getCandidateId() + " response : " + voteGranted + " at " + now/1000 + " s with response type : " + response.getType());
+        // System.out.println("created vote response for " + request.getCandidateId() + " response : " + voteGranted + " at " + now/1000 + " s with response type : " + response.getType());
 
         try {
             String jsonResponse = gson.toJson(response);
             ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
             channel.write(buffer);
-            System.out.println("Write Buffer to " + channel.getRemoteAddress() + " done");
+            // System.out.println("Write Buffer to " + channel.getRemoteAddress() + " done");
 
         } catch (IOException e) {
             System.err.println("Error sending vote response: " + e.getMessage());
@@ -409,12 +415,12 @@ public class RaftNode {
             return;
         }
 
-        System.out.println("=== Vote Response Processing ===");
-        System.out.println("Current node type: " + nodeType);
-        System.out.println("Response from: " + response.getVoterId());
-        System.out.println("Vote granted: " + response.isVoteGranted());
-        System.out.println("Current votes: " + receivedVotes);
-        System.out.println("handling vote response from " + response.getVoterId() + " with term " + response.getTerm());
+        // System.out.println("=== Vote Response Processing ===");
+        // System.out.println("Current node type: " + nodeType);
+        // System.out.println("Response from: " + response.getVoterId());
+        // System.out.println("Vote granted: " + response.isVoteGranted());
+        // System.out.println("Current votes: " + receivedVotes);
+        // System.out.println("handling vote response from " + response.getVoterId() + " with term " + response.getTerm());
 
         if (response.getTerm() > currentTerm) {
             currentTerm = response.getTerm();
@@ -451,45 +457,22 @@ public class RaftNode {
             inElection = false;  // Reset election state
 
             // Update all serverInfo entries - find self by port match
-            boolean foundSelf = false;
-            for (ServerInfo member : clusterMembers) {
-                if (member.getPort() == this.port) {
-                    member.setType(NodeType.LEADER);
-                    foundSelf = true;
-                    System.out.println("DEBUG: Updated self in clusterMembers to LEADER");
-                } else if (member.getType() == NodeType.LEADER) {
-                    member.setType(NodeType.FOLLOWER);
-                }
-            }
-
-            if (!foundSelf) {
-                System.out.println("WARNING: Couldn't find self in clusterMembers when becoming leader!");
-            }
-
-            // Print current cluster state
-            System.out.println("DEBUG: Cluster members after becoming leader:");
-            for (ServerInfo member : clusterMembers) {
-                System.out.println("  - " + member.getHost() + ":" + member.getPort() + " (" + member.getType() + ")");
-            }
+            String leaderId = this.address.getHostAddress() + ":" + this.port;
+            syncLeaderStatus(leaderId);
 
             // Initialize leader state
-            this.nextIndex = new ArrayList<>();
-            this.matchIndex = new ArrayList<>();
+            this.nextIndexMap.clear();
+            this.matchIndexMap.clear();
             long leaderLastLogIndex = lastLogIndex; // Use the actual lastLogIndex
-
-            System.out.println("Initializing leader state with lastLogIndex: " + leaderLastLogIndex);
-
-            for (int i = 0; i < clusterMembers.size(); i++) {
-                nextIndex.add((int) leaderLastLogIndex + 1); 
-                matchIndex.add(0); 
+            
+            // Initialize nextIndex for all connections to other nodes
+            for (NodeConnection connection : nodeConnections.values()) {
+                this.matchIndexMap.put(connection, 0L); // Initialize matchIndex to 0
+                this.nextIndexMap.put(connection, leaderLastLogIndex + 1);
+                // System.out.println("Initialized nextIndex for " + connection.getServerInfo() + " to " + (leaderLastLogIndex + 1));
             }
             
-            // Initialize nextIndex for existing connections
-            for (Map.Entry<ServerInfo, NodeConnection> entry : nodeConnections.entrySet()) {
-                NodeConnection connection = entry.getValue();
-                connection.setNextIndex((int) leaderLastLogIndex + 1);
-                System.out.println("Initialized nextIndex for " + entry.getKey() + " to " + connection.getNextIndex());
-            }
+            // System.out.println("Initializing leader state with lastLogIndex: " + leaderLastLogIndex);
             
             startHeartbeat();
         }
@@ -500,10 +483,10 @@ public class RaftNode {
             nodeType = NodeType.FOLLOWER;
             votedFor = null;
             receivedVotes = 0;
-
             // Update own status in clusterMembers
             for (ServerInfo member : clusterMembers) {
-                if (member.getPort() == this.port && member.getHost().equals(this.address.getHostAddress())) {
+                if (member.getPort() == this.port) {
+                    System.out.println("setting member type of " + member.getHost() + ":" + member.getPort() + " to follower");
                     member.setType(NodeType.FOLLOWER);
                     break;
                 }
@@ -612,10 +595,10 @@ public class RaftNode {
         
         try {
             int bytesRead = channel.read(buffer);
-            System.out.println("Read " + bytesRead + " bytes from " + channel.getRemoteAddress());
+            // System.out.println("Read " + bytesRead + " bytes from " + channel.getRemoteAddress());
             if (bytesRead == -1) {
-                System.out.println("bytes read : " + bytesRead + " connection closed from " + channel.getRemoteAddress());
-                System.out.println("--------------------------------");
+                // System.out.println("bytes read : " + bytesRead + " connection closed from " + channel.getRemoteAddress());
+                // System.out.println("--------------------------------");
                 closeConnection(channel);
                 return;
             }
@@ -666,9 +649,9 @@ public class RaftNode {
                             CommandVote vote = commandVotes.get(commandId);
                             if (vote != null) {
                                 vote.replicatedNodes.add(followerId);
-                                System.out.println("Received log replication confirmation from " + followerId + 
-                                    " for command " + commandId + 
-                                    " (total replicated: " + vote.replicatedNodes.size() + ")");
+                                // System.out.println("Received log replication confirmation from " + followerId + 
+                                //     " for command " + commandId + 
+                                //     " (total replicated: " + vote.replicatedNodes.size() + ")");
                             }
                         }
                         return;
@@ -707,9 +690,9 @@ public class RaftNode {
                         (leader.getHost() + ":" + leader.getPort() + " type=" + leader.getType()) : "null"));
 
                     
-                    System.out.println("DEBUG: Current cluster members:");
+                    // System.out.println("DEBUG: Current cluster members:");
                     for (ServerInfo member : clusterMembers) {
-                        System.out.println("  - " + member.getHost() + ":" + member.getPort() + " (" + member.getType() + ")");
+                        // System.out.println("  - " + member.getHost() + ":" + member.getPort() + " (" + member.getType() + ")");
                     }
 
                     if (leader != null) {
@@ -724,8 +707,8 @@ public class RaftNode {
                         sendResponse(clientChannel, response);
                         
                         // After sending redirect response, close the connection
-                        System.out.println("Closing client connection and redirecting to leader: " + 
-                                        leader.getHost() + ":" + leader.getPort());
+                        // System.out.println("Closing client connection and redirecting to leader: " + 
+                        //                 leader.getHost() + ":" + leader.getPort());
                         closeConnection(clientChannel);
                         return;
                     } else {
@@ -807,13 +790,13 @@ public class RaftNode {
                             activeNodes++;
                         }
                     }
-                    System.out.println("Active nodes: " + activeNodes + 
-                        ", Current votes for command " + message.getId() + ": " + vote.votes.size());
+                    // System.out.println("Active nodes: " + activeNodes + 
+                    //     ", Current votes for command " + message.getId() + ": " + vote.votes.size());
 
                     if (vote.votes.size() >= (activeNodes / 2)) {
                         // We have majority, execute the command
-                        System.out.println("Received majority votes for command " + message.getId() + 
-                            ", executing command");
+                        // System.out.println("Received majority votes for command " + message.getId() + 
+                        //     ", executing command");
                         vote.executed = true;
                         
                         // Calculate the correct log index for the new entry
@@ -833,9 +816,9 @@ public class RaftNode {
                         lastLogIndex = newLogIndex;
                         lastLogTerm = currentTerm;
                         
-                        System.out.println("Added new log entry: index=" + newEntry.getLogIndex() + 
-                            ", term=" + newEntry.getTerm() + ", method=" + newEntry.getMethod());
-                        System.out.println("Updated lastLogIndex to: " + lastLogIndex);
+                        // System.out.println("Added new log entry: index=" + newEntry.getLogIndex() + 
+                        //     ", term=" + newEntry.getTerm() + ", method=" + newEntry.getMethod());
+                        // System.out.println("Updated lastLogIndex to: " + lastLogIndex);
                         
                         // Execute the command
                         RpcResponse rpcResponse = executeCommand(message);
@@ -861,8 +844,8 @@ public class RaftNode {
                         }
                         
                         // If we got here, some followers didn't replicate in time
-                        System.out.println("Warning: Not all followers replicated command " + message.getId() + 
-                            " (replicated by " + vote.replicatedNodes.size() + " of " + (activeNodes - 1) + " followers)");
+                        // System.out.println("Warning: Not all followers replicated command " + message.getId() + 
+                        //     " (replicated by " + vote.replicatedNodes.size() + " of " + (activeNodes - 1) + " followers)");
                         return rpcResponse;
                     }
                 }
@@ -877,8 +860,8 @@ public class RaftNode {
             // If we didn't get majority, retry
             retryCount++;
             if (retryCount < MAX_RETRIES) {
-                System.out.println("Retrying command " + message.getId() + 
-                    " (attempt " + (retryCount + 1) + " of " + MAX_RETRIES + ")");
+                // System.out.println("Retrying command " + message.getId() + 
+                //     " (attempt " + (retryCount + 1) + " of " + MAX_RETRIES + ")");
                 // Clear previous votes for this retry
                 vote.votes.clear();
                 vote.replicatedNodes.clear();
@@ -886,8 +869,8 @@ public class RaftNode {
         }
 
         // If we've exhausted all retries, return timeout error
-        System.out.println("Command " + message.getId() + " timed out after " + MAX_RETRIES + 
-            " retries. Received " + vote.votes.size() + " votes");
+        // System.out.println("Command " + message.getId() + " timed out after " + MAX_RETRIES + 
+        //     " retries. Received " + vote.votes.size() + " votes");
         commandVotes.remove(message.getId());
         return new RpcResponse(message.getId(), 
             new RpcResponse.RpcError(-32006, "Command timed out waiting for votes after " + MAX_RETRIES + " retries", null));
@@ -1032,19 +1015,31 @@ public class RaftNode {
 
         private void sendAppendEntries(NodeConnection connection, RpcMessage command) {
             try {
+                if (nodeType != NodeType.LEADER) {
+                    System.out.println("Not leader, cannot send AppendEntries");
+                    return;
+                }
             
-                int followerNextIndex = connection.getNextIndex(); 
+                // 1. Dapatkan currentTerm
 
-                long prevLogIndex = followerNextIndex - 1;
-                long prevLogTerm = 0; 
+                    long prevLogIndex = 0;
+                    long prevLogTerm = 0;
 
-                System.out.println("=== Preparing AppendEntries ===");
-                System.out.println("Current term: " + currentTerm);
-                System.out.println("Follower nextIndex: " + followerNextIndex);
-                System.out.println("Calculated prevLogIndex: " + prevLogIndex);
-                System.out.println("Log entries size: " + logEntries.size());
-                System.out.println("Last log index: " + lastLogIndex);
-
+                // System.out.println("=== Preparing AppendEntries ===");
+                // System.out.println("Current term: " + currentTerm);
+                // System.out.println("Follower nextIndex: " + followerNextIndex);
+                // System.out.println("Calculated prevLogIndex: " + prevLogIndex);
+                // System.out.println("Log entries size: " + logEntries.size());
+                // System.out.println("Last log index: " + lastLogIndex);
+                if (lastLogIndex == 0){
+                    prevLogIndex = 0;
+                    prevLogTerm = 0;
+                }else{
+                    long followerNextIndex = nextIndexMap.get(connection);
+                    System.out.println("followerNextIndex dalam sendAppendEntries untuk connection: " + connection.getServerInfo() + " adalah: " + followerNextIndex);
+                    prevLogIndex = followerNextIndex - 1;
+                    prevLogTerm = 0;
+                }
                 if (prevLogIndex > 0 && prevLogIndex <= logEntries.size()) {
                     LogEntry prevEntry = logEntries.get((int)prevLogIndex - 1);
                     prevLogTerm = prevEntry.getTerm();
@@ -1064,7 +1059,7 @@ public class RaftNode {
                             ", adjusting to start from beginning");
                         prevLogIndex = 0;
                         prevLogTerm = 0;
-                        connection.setNextIndex(1); // Reset follower's nextIndex
+                        nextIndexMap.put(connection, (long) 1);
                     }
                 }
 
@@ -1094,7 +1089,7 @@ public class RaftNode {
                         " for command ID: " + (command != null ? command.getId() : "heartbeat") +
                         " with prevLogIndex: " + prevLogIndex + " and prevLogTerm: " + prevLogTerm +
                         " (current term: " + currentTerm + ")");
-                System.out.println("=== End Preparing AppendEntries ===");
+                // System.out.println("=== End Preparing AppendEntries ===");
                 connection.send(jsonMessage);
 
             } catch (IOException e) {
@@ -1105,60 +1100,49 @@ public class RaftNode {
     private void handleAppendEntries(SocketChannel channel, AppendEntriesMessage message) {
         synchronized (voteLock) {
             boolean success = false;
+            long matchIndex = 0;
 
             // Update Leader status
             syncLeaderStatus(message.getLeaderId());
             
-            System.out.println("=== Processing AppendEntries ===");
-            System.out.println("Node: " + address.getHostAddress() + ":" + port);
-            System.out.println("Message term: " + message.getTerm() + ", Current term: " + currentTerm);
-            System.out.println("PrevLogIndex: " + message.getPrevLogIndex() + ", PrevLogTerm: " + message.getPrevLogTerm());
-            System.out.println("LastLogIndex: " + lastLogIndex + ", LogEntries size: " + logEntries.size());
-            
+            // System.out.println("=== Processing AppendEntries ===");
+            // System.out.println("Node: " + address.getHostAddress() + ":" + port);
+            // System.out.println("Message term: " + message.getTerm() + ", Current term: " + currentTerm);
+            // System.out.println("PrevLogIndex: " + message.getPrevLogIndex() + ", PrevLogTerm: " + message.getPrevLogTerm());
+            // System.out.println("LastLogIndex: " + lastLogIndex + ", LogEntries size: " + logEntries.size());
+            System.out.println("message term: " + message.getTerm() + " current term: " + currentTerm + " message prevLogIndex: " + message.getPrevLogIndex() + " lastLogIndex: " + lastLogIndex + " message prevLogTerm: " + message.getPrevLogTerm() + " lastLogTerm: " + lastLogTerm);
+
             // 1. Reply false if term < currentTerm (§5.1)
             if (message.getTerm() < currentTerm) {
                 System.out.println("Rejecting: message term < current term");
                 success = false;
             } else {
+                lastHeartbeatReceived = System.currentTimeMillis();
+
                 // Update term if message term is higher
                 if (message.getTerm() > currentTerm) {
                     currentTerm = message.getTerm();
                     PersistentState.saveState(currentTerm, votedFor, logEntries);
                     revertToFollower();
                 }
-                
-                if (message.getPrevLogIndex() == 0) {
-                    // Always accept when prevLogIndex = 0 (empty log or starting from beginning)
+                if (message.getPrevLogIndex() == 0 && lastLogIndex == 0L) {
                     success = true;
-                    System.out.println("Accepting AppendEntries with prevLogIndex=0 (empty/short log)");
-                } else if (message.getPrevLogIndex() > lastLogIndex) {
+                    System.out.println("Accepting AE from "+message.getLeaderId()+" : prevLogIndex is 0. Resetting local log to match leader.");
+                    if (!logEntries.isEmpty()) {
+                        synchronized (logLock) { // Pastikan operasi log dilindungi
+                            lastLogIndex = 0;
+                            lastLogTerm = 0;
+                        }
+                    }
+                }else if (message.getPrevLogIndex() > lastLogIndex) {
                     System.out.println("Rejecting: prevLogIndex > lastLogIndex");
                     success = false;
-                } else if (message.getPrevLogIndex() > 0) {
-                    // Check if we have the entry at prevLogIndex and if its term matches
-                    if (message.getPrevLogIndex() <= logEntries.size()) {
-                        LogEntry prevEntry = logEntries.get((int)message.getPrevLogIndex() - 1);
-                        System.out.println("Checking log entry at index " + message.getPrevLogIndex() + 
-                            ": actual term=" + prevEntry.getTerm() + ", expected term=" + message.getPrevLogTerm());
-                        
-                        if (prevEntry.getTerm() != message.getPrevLogTerm()) {
-                            System.out.println("Log entry at index " + message.getPrevLogIndex() + 
-                                " has term " + prevEntry.getTerm() + 
-                                ", expected " + message.getPrevLogTerm());
-                            
-                            if (Math.abs(prevEntry.getTerm() - message.getPrevLogTerm()) <= 1) {
-                                System.out.println("Term difference is small, accepting for log consistency");
-                                success = true;
-                            } else {
-                                System.out.println("Term mismatch too large, rejecting");
-                                success = false;
-                            }
-                        } else {
-                            System.out.println("Log entry term matches, accepting");
-                            success = true;
-                        }
-                    } else {
-                        System.out.println("Rejecting: prevLogIndex > logEntries.size()");
+                } else{
+                    if (message.getPrevLogIndex() == lastLogIndex && message.getPrevLogTerm() == lastLogTerm) {
+                        success = true;
+                    }else{
+                        // implementasi jika log lebih maju
+                        System.out.println("Rejecting: else");
                         success = false;
                     }
                 }
@@ -1168,7 +1152,8 @@ public class RaftNode {
                     
                     // Calculate the correct log index for the new entry
                     long newLogIndex = lastLogIndex + 1;
-                    
+                    matchIndex = newLogIndex;
+
                     // Add new entry with the correct index
                     LogEntry newEntry = new LogEntry(
                         message.getCommand().getMethod(),
@@ -1183,9 +1168,9 @@ public class RaftNode {
                     lastLogIndex = newLogIndex;
                     lastLogTerm = currentTerm;
                     
-                    System.out.println("Added new log entry: index=" + newEntry.getLogIndex() + 
-                        ", term=" + newEntry.getTerm() + ", method=" + newEntry.getMethod());
-                    System.out.println("Updated lastLogIndex to: " + lastLogIndex);
+                    // System.out.println("Added new log entry: index=" + newEntry.getLogIndex() + 
+                    //     ", term=" + newEntry.getTerm() + ", method=" + newEntry.getMethod());
+                    // System.out.println("Updated lastLogIndex to: " + lastLogIndex);
                     
                     // Execute the command
                     RpcResponse rpcResponse = executeCommand(message.getCommand());
@@ -1194,27 +1179,28 @@ public class RaftNode {
                     PersistentState.saveState(currentTerm, votedFor, logEntries);
                 } else if (success && message.getCommand() == null) {
                     // This is a heartbeat AppendEntries - just update lastHeartbeatReceived
-                    lastHeartbeatReceived = System.currentTimeMillis();
-                    System.out.println("Received heartbeat AppendEntries, updated lastHeartbeatReceived");
+                    matchIndex = lastLogIndex; // Use lastLogIndex as matchIndex for heartbeat
+                    // System.out.println("Received heartbeat AppendEntries, updated lastHeartbeatReceived");
                 }
             }
 
-            System.out.println("AppendEntries result: " + success);
-            System.out.println("=== End Processing AppendEntries ===");
+            // System.out.println("AppendEntries result: " + success);
+            // System.out.println("=== End Processing AppendEntries ===");
 
             // Send response
             AppendEntriesResponse response = new AppendEntriesResponse(
                 currentTerm,
                 success,
-                address.getHostAddress() + ":" + port
+                address.getHostAddress() + ":" + port,
+                matchIndex
             );
 
             try {
                 String jsonResponse = gson.toJson(response);
                 ByteBuffer buffer = ByteBuffer.wrap((jsonResponse + "\n").getBytes());
                 channel.write(buffer);
-                System.out.println("Sent AppendEntries response: " + jsonResponse + 
-                    " for command ID: " + (message.getCommand() != null ? message.getCommand().getId() : "null"));
+                // System.out.println("Sent AppendEntries response: " + jsonResponse + 
+                //     " for command ID: " + (message.getCommand() != null ? message.getCommand().getId() : "null"));
             } catch (IOException e) {
                 System.err.println("Error sending AppendEntries response: " + e.getMessage());
             }
@@ -1222,8 +1208,11 @@ public class RaftNode {
     }
 
     private void handleAppendEntriesResponse(SocketChannel channel, AppendEntriesResponse response) {
-        System.out.println("Processing AppendEntries response from " + response.getFollowerId());
-        
+        // System.out.println("Processing AppendEntries response from " + response.getFollowerId());
+        if (nodeType != NodeType.LEADER) {
+            System.out.println("Ignoring AppendEntries response, not a leader");
+            return;
+        }
         if (response.getTerm() > currentTerm) {
             currentTerm = response.getTerm();
             PersistentState.saveState(currentTerm, votedFor, logEntries);
@@ -1237,7 +1226,7 @@ public class RaftNode {
                 CommandVote vote = entry.getValue();
                 if (!vote.executed) {
                     vote.votes.add(response.getFollowerId());
-                    System.out.println("Added vote from " + response.getFollowerId() + " for command ID: " + entry.getKey());
+                    // System.out.println("Added vote from " + response.getFollowerId() + " for command ID: " + entry.getKey());
                     System.out.println("Current votes for command " + entry.getKey() + ": " + vote.votes.size());
                     break;
                 }
@@ -1245,36 +1234,29 @@ public class RaftNode {
             
             // Update nextIndex for successful AppendEntries
             ServerInfo followerInfo = null;
+            String followerId = response.getFollowerId();
             for (ServerInfo info : clusterMembers) {
-                System.out.println("Checking cluster member: " + info.getHost() + ":" + info.getPort() + 
-                    " against response: " + response.getFollowerId());
-                if ((info.getHost() + ":" + info.getPort()).equals(response.getFollowerId())) {
+                // System.out.println("Checking cluster member: " + info.getPort() + " against response: " + followerId);
+                if (followerId.contains(Integer.toString(info.getPort()))) {
                     followerInfo = info;
-                    System.out.println("Found matching follower info: " + followerInfo);
+                    // System.out.println("Found matching follower info: " + followerInfo);
                     break;
                 }
             }
             
             if (followerInfo != null) {
                 NodeConnection connection = nodeConnections.get(followerInfo);
-                System.out.println("Looking for connection for follower: " + followerInfo);
-                System.out.println("Available connections: " + nodeConnections.keySet());
+                // System.out.println("Looking for connection for follower: " + followerInfo);
+                // System.out.println("Available connections: " + nodeConnections.keySet());
                 
                 if (connection != null) {
-                    System.out.println("Found connection for follower: " + followerInfo);
-                    // Increment nextIndex for successful AppendEntries
-                    int currentNextIndex = connection.getNextIndex();
-                    int newNextIndex = currentNextIndex + 1;
+                    // System.out.println("Found connection for follower: " + followerInfo);
                     
-                    System.out.println("Successful AppendEntries: incrementing nextIndex for " + response.getFollowerId() + 
-                        " from " + currentNextIndex + " to " + newNextIndex);
+                    matchIndexMap.put(connection, response.getMatchIndex());
+                    nextIndexMap.put(connection, response.getMatchIndex() + 1);
+
+                    System.out.println("nextIndex untuk connection: " + connection.getServerInfo() + " setelah successful AppendEntries: " + nextIndexMap.get(connection));
                     
-                    connection.setNextIndex(newNextIndex);
-                    
-                    // Log current state for debugging
-                    System.out.println("Leader log size: " + logEntries.size() + 
-                        ", lastLogIndex: " + lastLogIndex + 
-                        ", currentTerm: " + currentTerm);
                 } else {
                     System.err.println("No connection found for follower: " + response.getFollowerId());
                     System.err.println("Available connections: " + nodeConnections.keySet());
@@ -1287,9 +1269,8 @@ public class RaftNode {
             // Decrement nextIndex and retry with more conservative approach
             ServerInfo followerInfo = null;
             for (ServerInfo info : clusterMembers) {
-                System.out.println("Checking cluster member: " + info.getHost() + ":" + info.getPort() + 
-                    " against response: " + response.getFollowerId());
-                if ((info.getHost() + ":" + info.getPort()).equals(response.getFollowerId())) {
+                // System.out.println("Checking cluster member: " + info.getHost() + ":" + info.getPort() + " against response: " + response.getFollowerId());
+                if ((response.getFollowerId().contains(Integer.toString(info.getPort())))) {
                     followerInfo = info;
                     System.out.println("Found matching follower info: " + followerInfo);
                     break;
@@ -1299,19 +1280,8 @@ public class RaftNode {
             if (followerInfo != null) {
                 NodeConnection connection = nodeConnections.get(followerInfo);
                 if (connection != null) {
-                    int nextIdx = connection.getNextIndex();
-                    if (nextIdx > 1) {
-                        connection.setNextIndex(nextIdx - 1);
-                        System.out.println("Decremented nextIndex for " + response.getFollowerId() + 
-                            " from " + nextIdx + " to " + connection.getNextIndex());
-                    } else {
-                        // If nextIndex is already 1, try a more aggressive reset
-                        System.out.println("nextIndex already at 1 for " + response.getFollowerId() + 
-                            ", attempting log repair from beginning");
-                        connection.setNextIndex(1);
-                    }
-                    // Send AppendEntries with the adjusted nextIndex
-                    sendAppendEntries(connection, null);
+                    // sendOldLogs(connection);
+                    nextIndexMap.put(connection, nextIndexMap.get(connection) - 1);
                 }
             }
         }
@@ -1792,49 +1762,40 @@ public class RaftNode {
     // Add method to send heartbeat AppendEntries for log synchronization
     private void sendHeartbeatAppendEntries(NodeConnection connection) {
         try {
-            int followerNextIndex = connection.getNextIndex(); 
-            long prevLogIndex = followerNextIndex - 1;
-            long prevLogTerm = 0; 
 
-            System.out.println("=== Preparing Heartbeat AppendEntries ===");
-            System.out.println("Follower nextIndex: " + followerNextIndex);
-            System.out.println("Calculated prevLogIndex: " + prevLogIndex);
-            System.out.println("Log entries size: " + logEntries.size());
-            System.out.println("Last log index: " + lastLogIndex);
-
-            if (prevLogIndex > 0 && prevLogIndex <= logEntries.size()) {
-                prevLogTerm = logEntries.get((int)prevLogIndex - 1).getTerm();
-                System.out.println("Found log entry at index " + prevLogIndex + " with term: " + prevLogTerm);
-            } else if (prevLogIndex == 0) {
-                System.out.println("Starting from beginning (prevLogIndex=0), using prevLogTerm=0");
-                prevLogTerm = 0;
-            } else {
-                System.out.println("No log entry found at index " + prevLogIndex + ", using prevLogTerm = 0");
-                // If prevLogIndex is beyond our log, we need to adjust
-                if (prevLogIndex > logEntries.size()) {
-                    System.out.println("WARNING: prevLogIndex " + prevLogIndex + 
-                        " > logEntries.size " + logEntries.size() + 
-                        ", adjusting to start from beginning");
-                    prevLogIndex = 0;
-                    prevLogTerm = 0;
-                    connection.setNextIndex(1); // Reset follower's nextIndex
-                }
+            if (nodeType != NodeType.LEADER) {
+                System.out.println("Not a leader, cannot send heartbeat AppendEntries");
+                return;
             }
 
-            // Send empty AppendEntries (heartbeat) to help with log synchronization
+            long followerNextIndex = nextIndexMap.get(connection);
+
+            RpcMessage command = null;
+            LogEntry logEntry = null;
+            LogEntry prevEntry = null;  
+
+            if (followerNextIndex <= lastLogIndex) {
+                logEntry = logEntries.get((int) followerNextIndex - 1);
+                if (followerNextIndex > 1) {
+                    prevEntry = logEntries.get((int) followerNextIndex - 2);
+                }
+                command = new RpcMessage(logEntry.getCommandId(), logEntry.getMethod(), logEntry.getParams());
+            }
+
             AppendEntriesMessage appendEntries = new AppendEntriesMessage(
                 address.getHostAddress() + ":" + port,
-                currentTerm,
-                null, // No command for heartbeat
-                prevLogIndex,
-                prevLogTerm
+                logEntry != null ? logEntry.getTerm() : currentTerm,
+                command,
+                prevEntry != null ? prevEntry.getLogIndex() : 0, // default ke 0
+                prevEntry != null ? prevEntry.getTerm() : 0      // default ke 0
             );
+
 
             String jsonMessage = gson.toJson(appendEntries);
             connection.send(jsonMessage);
-            System.out.println("Sent heartbeat AppendEntries to " + connection.getServerInfo() +
-                " with prevLogIndex: " + prevLogIndex + " and prevLogTerm: " + prevLogTerm);
-            System.out.println("=== End Preparing Heartbeat AppendEntries ===");
+            // System.out.println("Sent heartbeat/AppendEntries to " + connection.getServerInfo() +
+            //     " with prevLogIndex: " + prevLogIndex + " and prevLogTerm: " + prevLogTerm);
+            // System.out.println("=== End Preparing Heartbeat AppendEntries ===");
 
         } catch (IOException e) {
             System.err.println("Error sending heartbeat AppendEntries: " + e.getMessage());
@@ -1872,7 +1833,7 @@ public class RaftNode {
             int leaderPort = Integer.parseInt(parts[1]);
             
             String myId = address.getHostAddress() + ":" + port;
-            System.out.println("DEBUG: syncLeaderStatus called with leaderId: " + leaderId + ", my ID is: " + myId);
+            // System.out.println("DEBUG: syncLeaderStatus called with leaderId: " + leaderId + ", my ID is: " + myId);
             
             boolean leaderFound = false;
             boolean iAmTheLeader = port == leaderPort;
@@ -1883,17 +1844,17 @@ public class RaftNode {
                     // This is the leader, regardless of hostname/IP
                     server.setType(NodeType.LEADER);
                     leaderFound = true;
-                    System.out.println("DEBUG: Marked server " + server.getHost() + ":" + server.getPort() + " as LEADER");
+                    // System.out.println("DEBUG: Marked server " + server.getHost() + ":" + server.getPort() + " as LEADER");
                 } else if (server.getType() == NodeType.LEADER) {
                     server.setType(NodeType.FOLLOWER);
-                    System.out.println("DEBUG: Reverted " + server.getHost() + ":" + server.getPort() + " from LEADER to FOLLOWER");
+                    // System.out.println("DEBUG: Reverted " + server.getHost() + ":" + server.getPort() + " from LEADER to FOLLOWER");
                 }
             }
             
             // Update this node's status based on whether it's the leader
             if (iAmTheLeader) {
                 if (nodeType != NodeType.LEADER) {
-                    System.out.println("DEBUG: This node is the leader but nodeType is " + nodeType + ", updating to LEADER");
+                    // System.out.println("DEBUG: This node is the leader but nodeType is " + nodeType + ", updating to LEADER");
                     nodeType = NodeType.LEADER;
                     // Only the actual leader should initiate heartbeats
                     if (!heartbeatActive) {
@@ -1902,19 +1863,19 @@ public class RaftNode {
                 }
             } else {
                 if (nodeType == NodeType.LEADER) {
-                    System.out.println("DEBUG: This node is not the leader but nodeType is LEADER, updating to FOLLOWER");
+                    // System.out.println("DEBUG: This node is not the leader but nodeType is LEADER, updating to FOLLOWER");
                     nodeType = NodeType.FOLLOWER;
                     // Stop sending heartbeats if we're not the leader
                     stopHeartbeat();
                 }
             }
             
-            System.out.println("DEBUG: After syncLeaderStatus, leaderFound=" + leaderFound + ", iAmTheLeader=" + iAmTheLeader);
+            // System.out.println("DEBUG: After syncLeaderStatus, leaderFound=" + leaderFound + ", iAmTheLeader=" + iAmTheLeader);
             
             // Print current cluster state after update
-            System.out.println("DEBUG: Current cluster members after update:");
+            // System.out.println("DEBUG: Current cluster members after update:");
             for (ServerInfo member : clusterMembers) {
-                System.out.println("  - " + member.getHost() + ":" + member.getPort() + " (" + member.getType() + ")");
+                System.out.println("[DEBUG] in syncleaderstatus:  - " + member.getHost() + ":" + member.getPort() + " (" + member.getType() + ")");
             }
         } catch (Exception e) {
             System.err.println("Error in syncLeaderStatus: " + e.getMessage());
