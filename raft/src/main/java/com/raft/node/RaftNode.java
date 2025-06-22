@@ -1020,10 +1020,10 @@ public class RaftNode {
                     return;
                 }
             
-                // 1. Dapatkan currentTerm
-
-                    long prevLogIndex = 0;
-                    long prevLogTerm = 0;
+                long followerNextIndex = nextIndexMap.get(connection);
+                System.out.println("followerNextIndex dalam sendAppendEntries untuk connection: " + connection.getServerInfo() + " adalah: " + followerNextIndex);
+                long prevLogIndex = followerNextIndex - 1;
+                long prevLogTerm = 0;
 
                 // System.out.println("=== Preparing AppendEntries ===");
                 // System.out.println("Current term: " + currentTerm);
@@ -1031,15 +1031,7 @@ public class RaftNode {
                 // System.out.println("Calculated prevLogIndex: " + prevLogIndex);
                 // System.out.println("Log entries size: " + logEntries.size());
                 // System.out.println("Last log index: " + lastLogIndex);
-                if (lastLogIndex == 0){
-                    prevLogIndex = 0;
-                    prevLogTerm = 0;
-                }else{
-                    long followerNextIndex = nextIndexMap.get(connection);
-                    System.out.println("followerNextIndex dalam sendAppendEntries untuk connection: " + connection.getServerInfo() + " adalah: " + followerNextIndex);
-                    prevLogIndex = followerNextIndex - 1;
-                    prevLogTerm = 0;
-                }
+
                 if (prevLogIndex > 0 && prevLogIndex <= logEntries.size()) {
                     LogEntry prevEntry = logEntries.get((int)prevLogIndex - 1);
                     prevLogTerm = prevEntry.getTerm();
@@ -1125,16 +1117,8 @@ public class RaftNode {
                     PersistentState.saveState(currentTerm, votedFor, logEntries);
                     revertToFollower();
                 }
-                if (message.getPrevLogIndex() == 0 && lastLogIndex == 0L) {
-                    success = true;
-                    System.out.println("Accepting AE from "+message.getLeaderId()+" : prevLogIndex is 0. Resetting local log to match leader.");
-                    if (!logEntries.isEmpty()) {
-                        synchronized (logLock) { // Pastikan operasi log dilindungi
-                            lastLogIndex = 0;
-                            lastLogTerm = 0;
-                        }
-                    }
-                }else if (message.getPrevLogIndex() > lastLogIndex) {
+                
+                if (message.getPrevLogIndex() > lastLogIndex) {
                     System.out.println("Rejecting: prevLogIndex > lastLogIndex");
                     success = false;
                 } else{
@@ -1767,29 +1751,26 @@ public class RaftNode {
                 System.out.println("Not a leader, cannot send heartbeat AppendEntries");
                 return;
             }
-
             long followerNextIndex = nextIndexMap.get(connection);
+
+            System.out.println("followerNextIndex dalam sendHeartbeatAppendEntries untuk connection: " + connection.getServerInfo() + " adalah: " + followerNextIndex);
 
             RpcMessage command = null;
             LogEntry logEntry = null;
-            LogEntry prevEntry = null;  
-
-            if (followerNextIndex <= lastLogIndex) {
-                logEntry = logEntries.get((int) followerNextIndex - 1);
-                if (followerNextIndex > 1) {
-                    prevEntry = logEntries.get((int) followerNextIndex - 2);
-                }
+            LogEntry prevEntry = null;
+            if (followerNextIndex < lastLogIndex){
+                logEntry = logEntries.get((int) followerNextIndex);
+                prevEntry = logEntries.get((int) followerNextIndex - 1);
                 command = new RpcMessage(logEntry.getCommandId(), logEntry.getMethod(), logEntry.getParams());
             }
-
+            // Send empty AppendEntries (heartbeat) to help with log synchronization
             AppendEntriesMessage appendEntries = new AppendEntriesMessage(
                 address.getHostAddress() + ":" + port,
                 logEntry != null ? logEntry.getTerm() : currentTerm,
-                command,
-                prevEntry != null ? prevEntry.getLogIndex() : 0, // default ke 0
-                prevEntry != null ? prevEntry.getTerm() : 0      // default ke 0
+                command, // No command for heartbeat
+                prevEntry != null ? prevEntry.getLogIndex() : lastLogIndex,
+                prevEntry != null ? prevEntry.getTerm() : lastLogTerm
             );
-
 
             String jsonMessage = gson.toJson(appendEntries);
             connection.send(jsonMessage);
